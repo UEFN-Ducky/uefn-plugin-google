@@ -1,0 +1,55 @@
+{
+  "id": "google",
+  "kind": "plugin",
+  "version": "1.0.13",
+  "label": "Google",
+  "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings → LLMs → Providers & Keys, and Gemini CLI under Coding Agents.",
+  "min_app_version": "1.0.523",
+  "default_enabled": true,
+  "secret_keys": [
+    "gemini"
+  ],
+  "contributes": {
+    "llm.providers": [
+      {
+        "id": "gemini",
+        "label": "Google",
+        "kind": "secret",
+        "secret_key": "gemini",
+        "order": 30
+      }
+    ],
+    "llm.coding_agents": [
+      {
+        "id": "gemini_cli",
+        "label": "Gemini CLI",
+        "order": 110
+      }
+    ],
+    "ide.hookups": [
+      {
+        "kind": "antigravity",
+        "label": "Antigravity"
+      }
+    ],
+    "walkthrough": {
+      "id": "google",
+      "title": "Set up Google Gemini",
+      "auto_start": "first_enable",
+      "settings_tab": "LLMs",
+      "steps": [
+        {
+          "target": "settings.llms.section.llms",
+          "title": "Providers & Keys",
+          "body": "Google Gemini lives under Settings → LLMs. Open Providers & Keys to paste your API key and turn on Gemini CLI.",
+          "advance": "require_click",
+          "mode": "rect"
+        }
+      ]
+    }
+  },
+  "backend": {
+    "entry": "backend",
+    "register": "register"
+  }
+}
