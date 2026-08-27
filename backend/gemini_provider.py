@@ -13,6 +13,7 @@ from backend.agent.providers.base import (
     ToolCallRequest,
 )
 from backend.agent.providers.cache_utils import parse_gemini_usage
+from .schema_sanitize import sanitize_gemini_schema
 
 
 class GeminiProvider:
@@ -67,7 +68,9 @@ class GeminiProvider:
                 types.FunctionDeclaration(
                     name=t["name"],
                     description=t.get("description", ""),
-                    parameters=t.get("parameters") or {"type": "object", "properties": {}},
+                    parameters=sanitize_gemini_schema(
+                        t.get("parameters") or {"type": "object", "properties": {}}
+                    ),
                 )
             )
         return [types.Tool(function_declarations=decls)] if decls else []
