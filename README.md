@@ -16,3 +16,7 @@ Writes `deploy/google-1.0.12.ducky-plugin.zip` (scripts/ and deploy/ are not pac
 ## Secrets
 
 Never commit tokens or keys. The app stores `gemini` locally (DPAPI), not in this package.
+
+## License
+
+MIT. Copyright (c) 2026 Mindful Path Company, LLC. See [LICENSE](LICENSE).
