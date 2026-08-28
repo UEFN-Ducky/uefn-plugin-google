@@ -1,7 +1,7 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "label": "Google",
   "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings → LLMs → Providers & Keys, and Gemini CLI under Coding Agents.",
   "min_app_version": "1.0.523",
