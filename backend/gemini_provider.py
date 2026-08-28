@@ -20,6 +20,9 @@ class GeminiProvider:
     def __init__(self, api_key: str, model: str) -> None:
         self._api_key = api_key
         self._model = model
+        # Raw model Content objects from function_call responses in the current
+        # tool-loop turn, preserving thought_signatures for thinking models.
+        self._fc_contents: list[Any] = []
 
     def _client(self):
         from google import genai
@@ -28,10 +31,35 @@ class GeminiProvider:
 
     def _to_gemini_contents(self, messages: list[ProviderMessage]) -> list[Any]:
         from google.genai import types
+        import json as _json
 
         contents: list[Any] = []
-        for m in messages:
+
+        # Identify assistant messages that carry tool_calls so we can tell
+        # which ones have matching stored raw Content (current tool-loop turn)
+        # vs historical ones (from a previous model or turn).
+        fc_indices: list[int] = [
+            i for i, m in enumerate(messages)
+            if m.role == "assistant" and m.tool_calls
+        ]
+        n_stored = len(self._fc_contents)
+        n_fc = len(fc_indices)
+        # The last `n_stored` fc-assistant messages come from the current
+        # tool-loop; earlier ones are historical and lack thought_signatures.
+        raw_map: dict[int, Any] = {}
+        if n_stored > 0 and n_fc > 0:
+            for offset, msg_i in enumerate(fc_indices[max(0, n_fc - n_stored):]):
+                if offset < n_stored:
+                    raw_map[msg_i] = self._fc_contents[offset]
+
+        # When we flatten a historical assistant+tool_calls to text, the
+        # subsequent tool-role messages are orphaned — skip them.
+        skip_tool_msgs = False
+
+        for i, m in enumerate(messages):
             if m.role == "tool":
+                if skip_tool_msgs:
+                    continue
                 contents.append(
                     types.Content(
                         role="user",
@@ -44,17 +72,38 @@ class GeminiProvider:
                     )
                 )
                 continue
+
+            # Any non-tool message resets the skip flag.
+            skip_tool_msgs = False
             role = "model" if m.role == "assistant" else "user"
+
+            if m.role == "assistant" and m.tool_calls:
+                if i in raw_map:
+                    # Current-turn: echo raw Content (preserves thought_signatures).
+                    contents.append(raw_map[i])
+                else:
+                    # Historical: flatten to plain text so the API doesn't see
+                    # functionCall parts without thought_signatures.
+                    lines: list[str] = []
+                    if m.content:
+                        lines.append(m.content)
+                    for tc in m.tool_calls:
+                        args_str = _json.dumps(tc.arguments, ensure_ascii=False)
+                        lines.append(f"[Called tool {tc.name}({args_str})]")
+                    contents.append(
+                        types.Content(
+                            role="model",
+                            parts=[types.Part.from_text(text="\n".join(lines))],
+                        )
+                    )
+                    skip_tool_msgs = True
+                continue
+
             parts: list[Any] = []
             if m.role == "user" and m.attachments:
                 parts.extend(build_gemini_user_parts(m.content, m.attachments))
             elif m.content:
                 parts.append(types.Part.from_text(text=m.content))
-            if m.tool_calls:
-                for tc in m.tool_calls:
-                    parts.append(
-                        types.Part.from_function_call(name=tc.name, args=tc.arguments)
-                    )
             if parts:
                 contents.append(types.Content(role=role, parts=parts))
         return contents
@@ -84,12 +133,19 @@ class GeminiProvider:
         cancel_event: Any | None = None,
         cache: PromptCachePayload | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        # Reset stored raw contents on a new user turn (not a tool-loop continuation).
+        if messages and messages[-1].role != "tool":
+            self._fc_contents = []
+
         client = self._client()
         collected_text = ""
         tool_calls: list[ToolCallRequest] = []
         gemini_tools = self._to_gemini_tools(tools)
         cancelled = False
         usage: dict[str, int] = {}
+        # Accumulate raw response Parts so we can echo them back with
+        # thought_signatures intact on the next tool-loop iteration.
+        raw_response_parts: list[Any] = []
 
         response = client.models.generate_content_stream(
             model=self._model,
@@ -109,6 +165,7 @@ class GeminiProvider:
             if not chunk.candidates:
                 continue
             for part in chunk.candidates[0].content.parts or []:
+                raw_response_parts.append(part)
                 if part.text:
                     collected_text += part.text
                     yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=part.text)
@@ -124,6 +181,14 @@ class GeminiProvider:
                     )
         if cancelled:
             return
+        # Store the raw model Content (with thought_signatures) so the next
+        # tool-loop iteration can echo it back without losing signatures.
+        if tool_calls and raw_response_parts:
+            from google.genai import types
+
+            self._fc_contents.append(
+                types.Content(role="model", parts=list(raw_response_parts))
+            )
         if tool_calls:
             yield StreamEvent(kind=StreamEventKind.TOOL_CALLS, tool_calls=tool_calls, usage=usage)
         yield StreamEvent(
