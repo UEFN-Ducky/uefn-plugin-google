@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, AsyncIterator
 
 from backend.agent.multimodal_content import build_gemini_user_parts
@@ -14,6 +16,108 @@ from backend.agent.providers.base import (
 )
 from backend.agent.providers.cache_utils import parse_gemini_usage
 from .schema_sanitize import sanitize_gemini_schema
+
+# Gemini (lite / thinking, especially) sometimes writes the call as text
+# instead of a functionCall part — then the turn looks finished and the user
+# has to type "continue". Skills also teach Cursor's mcp__server__tool names.
+_LEAKED_CALL_HEAD = re.compile(
+    r"\[(?:Tool call:|Called tool)\s+([A-Za-z_][A-Za-z0-9_./-]*)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def canonical_gemini_tool_name(name: str) -> str:
+    n = (name or "").strip()
+    if n.startswith("mcp__") and n.count("__") >= 2:
+        return n.rsplit("__", 1)[-1]
+    return n
+
+
+def _read_json_object(src: str, start: int) -> tuple[Any, int]:
+    """Parse a JSON object at src[start]. Returns (obj, index_after) or (None, start)."""
+    if start >= len(src) or src[start] != "{":
+        return None, start
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(src)):
+        ch = src[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(src[start : i + 1]), i + 1
+                except json.JSONDecodeError:
+                    return None, start
+    return None, start
+
+
+def extract_leaked_tool_calls(text: str) -> tuple[list[ToolCallRequest], str]:
+    """Turn `[Tool call: name({json})]` blobs into real calls; return leftover prose."""
+    if not text:
+        return [], text
+    calls: list[ToolCallRequest] = []
+    out: list[str] = []
+    pos = 0
+    while True:
+        match = _LEAKED_CALL_HEAD.search(text, pos)
+        if not match:
+            out.append(text[pos:])
+            break
+        out.append(text[pos : match.start()])
+        cursor = match.end()
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        obj, after = _read_json_object(text, cursor)
+        if not isinstance(obj, dict):
+            out.append(text[match.start() : match.end()])
+            pos = match.end()
+            continue
+        cursor = after
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor < len(text) and text[cursor] == ")":
+            cursor += 1
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor < len(text) and text[cursor] == "]":
+            cursor += 1
+        name = canonical_gemini_tool_name(match.group(1))
+        calls.append(
+            ToolCallRequest(
+                id=f"gemini_{name}_{len(calls)}",
+                name=name,
+                arguments=obj,
+            )
+        )
+        pos = cursor
+    return calls, "".join(out).strip()
+
+
+def _merge_tool_calls(
+    existing: list[ToolCallRequest], extra: list[ToolCallRequest]
+) -> None:
+    seen = {
+        (t.name, json.dumps(t.arguments, sort_keys=True, default=str)) for t in existing
+    }
+    for call in extra:
+        key = (call.name, json.dumps(call.arguments, sort_keys=True, default=str))
+        if key not in seen:
+            existing.append(call)
+            seen.add(key)
 
 
 class GeminiProvider:
@@ -31,7 +135,6 @@ class GeminiProvider:
 
     def _to_gemini_contents(self, messages: list[ProviderMessage]) -> list[Any]:
         from google.genai import types
-        import json as _json
 
         contents: list[Any] = []
 
@@ -94,13 +197,15 @@ class GeminiProvider:
                     contents.append(raw_map[i])
                 else:
                     # Historical: flatten to plain text so the API doesn't see
-                    # functionCall parts without thought_signatures.
+                    # functionCall parts without thought_signatures. Do not
+                    # write `[Called tool name({json})]` — Gemini copies that
+                    # into the text channel as a fake live call.
                     lines: list[str] = []
                     if m.content:
                         lines.append(m.content)
-                    for tc in m.tool_calls:
-                        args_str = _json.dumps(tc.arguments, ensure_ascii=False)
-                        lines.append(f"[Called tool {tc.name}({args_str})]")
+                    names = ", ".join(f"`{tc.name}`" for tc in m.tool_calls)
+                    if names:
+                        lines.append(f"Already ran {names}.")
                     contents.append(
                         types.Content(
                             role="model",
@@ -150,6 +255,7 @@ class GeminiProvider:
 
         client = self._client()
         collected_text = ""
+        thought_text = ""
         tool_calls: list[ToolCallRequest] = []
         gemini_tools = self._to_gemini_tools(tools)
         cancelled = False
@@ -158,6 +264,7 @@ class GeminiProvider:
         # thought_signatures intact on the next tool-loop iteration.
         raw_response_parts: list[Any] = []
         finish_reason = ""
+        native_function_call = False
 
         response = client.models.generate_content_stream(
             model=self._model,
@@ -184,28 +291,39 @@ class GeminiProvider:
             content = getattr(candidate, "content", None)
             for part in getattr(content, "parts", None) or []:
                 raw_response_parts.append(part)
-                if part.text:
-                    collected_text += part.text
-                    yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=part.text)
                 fc = getattr(part, "function_call", None)
                 if fc and fc.name:
+                    native_function_call = True
+                    name = canonical_gemini_tool_name(fc.name)
                     args = dict(fc.args) if fc.args else {}
                     tool_calls.append(
                         ToolCallRequest(
-                            id=f"gemini_{fc.name}_{len(tool_calls)}",
-                            name=fc.name,
+                            id=f"gemini_{name}_{len(tool_calls)}",
+                            name=name,
                             arguments=args,
                         )
                     )
+                if getattr(part, "thought", False):
+                    if part.text:
+                        thought_text += part.text
+                        yield StreamEvent(kind=StreamEventKind.THINKING, text=part.text)
+                    continue
+                if part.text:
+                    collected_text += part.text
         if cancelled:
             return
+        leaked, collected_text = extract_leaked_tool_calls(collected_text)
+        _merge_tool_calls(tool_calls, leaked)
+        if not tool_calls:
+            thought_leaked, _ = extract_leaked_tool_calls(thought_text)
+            _merge_tool_calls(tool_calls, thought_leaked)
+        if collected_text:
+            yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=collected_text)
         # Store the raw model Content (with thought_signatures) so the next
         # tool-loop iteration can echo it back without losing signatures.
-        if tool_calls and raw_response_parts:
-            from google.genai import types
-
-            self._fc_contents.append(
-                types.Content(role="model", parts=list(raw_response_parts))
+        if tool_calls:
+            self._store_function_call_content(
+                raw_response_parts, tool_calls, native=native_function_call
             )
         if tool_calls:
             yield StreamEvent(kind=StreamEventKind.TOOL_CALLS, tool_calls=tool_calls, usage=usage)
@@ -222,6 +340,42 @@ class GeminiProvider:
             stop_reason=stop_reason,
             usage=usage,
         )
+
+    def _store_function_call_content(
+        self,
+        raw_response_parts: list[Any],
+        tool_calls: list[ToolCallRequest],
+        *,
+        native: bool,
+    ) -> None:
+        from google.genai import types
+
+        if native and raw_response_parts:
+            self._fc_contents.append(
+                types.Content(role="model", parts=list(raw_response_parts))
+            )
+            return
+        # Text-channel recovery: synthesize functionCall parts so the next
+        # loop can pair functionResponse by name.
+        sig = next(
+            (
+                getattr(part, "thought_signature", None)
+                for part in raw_response_parts
+                if getattr(part, "thought_signature", None)
+            ),
+            None,
+        )
+        parts: list[Any] = []
+        for call in tool_calls:
+            part = types.Part.from_function_call(name=call.name, args=call.arguments)
+            if sig is not None:
+                try:
+                    part.thought_signature = sig
+                except Exception:
+                    pass
+            parts.append(part)
+        if parts:
+            self._fc_contents.append(types.Content(role="model", parts=parts))
 
     async def test_connection(self) -> tuple[bool, str]:
         try:
