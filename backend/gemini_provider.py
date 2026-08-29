@@ -52,6 +52,17 @@ class GeminiProvider:
                 if offset < n_stored:
                     raw_map[msg_i] = self._fc_contents[offset]
 
+        # Gemini pairs a functionResponse to its functionCall by NAME (unlike
+        # Anthropic/OpenAI, which pair by id), and rejects an empty one. Answering
+        # every call with the same placeholder name leaves the model believing its
+        # calls went unanswered, so it repeats them until the turn hits max turns.
+        call_names: dict[str, str] = {
+            tc.id: tc.name
+            for m in messages
+            if m.role == "assistant" and m.tool_calls
+            for tc in m.tool_calls
+        }
+
         # When we flatten a historical assistant+tool_calls to text, the
         # subsequent tool-role messages are orphaned — skip them.
         skip_tool_msgs = False
@@ -65,7 +76,7 @@ class GeminiProvider:
                         role="user",
                         parts=[
                             types.Part.from_function_response(
-                                name="tool",
+                                name=call_names.get(m.tool_call_id) or m.tool_call_id or "tool",
                                 response={"result": m.content},
                             )
                         ],
@@ -146,6 +157,7 @@ class GeminiProvider:
         # Accumulate raw response Parts so we can echo them back with
         # thought_signatures intact on the next tool-loop iteration.
         raw_response_parts: list[Any] = []
+        finish_reason = ""
 
         response = client.models.generate_content_stream(
             model=self._model,
@@ -164,7 +176,13 @@ class GeminiProvider:
                 usage = parse_gemini_usage(usage_metadata)
             if not chunk.candidates:
                 continue
-            for part in chunk.candidates[0].content.parts or []:
+            candidate = chunk.candidates[0]
+            reason = getattr(candidate, "finish_reason", None)
+            if reason:
+                finish_reason = getattr(reason, "name", None) or str(reason)
+            # A candidate stopped by a safety filter or the token cap carries no content.
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", None) or []:
                 raw_response_parts.append(part)
                 if part.text:
                     collected_text += part.text
@@ -191,10 +209,17 @@ class GeminiProvider:
             )
         if tool_calls:
             yield StreamEvent(kind=StreamEventKind.TOOL_CALLS, tool_calls=tool_calls, usage=usage)
+            stop_reason = "tool_calls"
+        elif finish_reason and finish_reason.upper() != "STOP":
+            # Surface a filtered or truncated turn, or the app shows it as a
+            # successful empty reply with no hint of why nothing came back.
+            stop_reason = finish_reason
+        else:
+            stop_reason = "stop"
         yield StreamEvent(
             kind=StreamEventKind.DONE,
             text=collected_text,
-            stop_reason="tool_calls" if tool_calls else "stop",
+            stop_reason=stop_reason,
             usage=usage,
         )
 

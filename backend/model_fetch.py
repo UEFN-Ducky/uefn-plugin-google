@@ -13,14 +13,10 @@ from backend.agent.model_fetch import (
     _PricingRow,
     _cache_put,
     _float_from_record,
-    _int_from_record,
     _merge_prices,
-    _parse_price_cell,
-    _per_million_from_token_rate,
 )
 
 _log = logging.getLogger(__name__)
-_CACHE_MAX = 512
 _CACHE_TTL_S = 6 * 3600.0
 
 
