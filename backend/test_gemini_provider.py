@@ -134,3 +134,99 @@ def test_text_parts_still_stream_normally() -> None:
     assert deltas == ["bonjour"]
     assert done.text == "bonjour"
     assert done.stop_reason == "stop"
+
+
+_LEAKED_EXECUTE_PYTHON = (
+    '[Tool call: mcp__uefn__execute_python({"code": '
+    '"import unreal\\nacts = unreal.EditorLevelLibrary.get_all_level_actors()\\nprint(len(acts))\\n"})]'
+)
+
+
+def test_text_channel_tool_call_is_recovered_and_not_shown() -> None:
+    """Gemini sometimes verbalizes the call as `[Tool call: …]` instead of a functionCall part."""
+    chunks = [_chunk(parts=[SimpleNamespace(text=_LEAKED_EXECUTE_PYTHON, function_call=None)], finish_reason="STOP")]
+
+    events = _run_turn(_provider(), chunks)
+
+    tool_events = [e for e in events if e.kind is StreamEventKind.TOOL_CALLS]
+    done = next(e for e in events if e.kind is StreamEventKind.DONE)
+    deltas = [e.text for e in events if e.kind is StreamEventKind.TEXT_DELTA]
+    assert len(tool_events) == 1
+    call = tool_events[0].tool_calls[0]
+    assert call.name == "execute_python"
+    assert "get_all_level_actors" in call.arguments["code"]
+    assert "[Tool call" not in (done.text or "")
+    assert not any("[Tool call" in (d or "") for d in deltas)
+    assert done.stop_reason == "tool_calls"
+
+
+def test_narration_around_a_leaked_call_is_kept() -> None:
+    text = "Je vérifie.\n" + _LEAKED_EXECUTE_PYTHON + "\n"
+    chunks = [_chunk(parts=[SimpleNamespace(text=text, function_call=None)], finish_reason="STOP")]
+
+    events = _run_turn(_provider(), chunks)
+
+    done = next(e for e in events if e.kind is StreamEventKind.DONE)
+    assert "Je vérifie." in (done.text or "")
+    assert "[Tool call" not in (done.text or "")
+    tool_events = [e for e in events if e.kind is StreamEventKind.TOOL_CALLS]
+    assert tool_events[0].tool_calls[0].name == "execute_python"
+
+
+def test_native_function_call_strips_mcp_prefix() -> None:
+    fc = SimpleNamespace(name="mcp__uefn__execute_python", args={"code": "print(1)"})
+    chunks = [_chunk(parts=[SimpleNamespace(text=None, function_call=fc)], finish_reason="STOP")]
+
+    events = _run_turn(_provider(), chunks)
+
+    call = next(e for e in events if e.kind is StreamEventKind.TOOL_CALLS).tool_calls[0]
+    assert call.name == "execute_python"
+    assert call.arguments == {"code": "print(1)"}
+
+
+def test_thought_text_is_not_shown_as_the_reply() -> None:
+    thought = SimpleNamespace(text="hmm", function_call=None, thought=True)
+    visible = SimpleNamespace(text="ok", function_call=None)
+    chunks = [_chunk(parts=[thought, visible], finish_reason="STOP")]
+
+    events = _run_turn(_provider(), chunks)
+
+    thinking = [e.text for e in events if e.kind is StreamEventKind.THINKING]
+    deltas = [e.text for e in events if e.kind is StreamEventKind.TEXT_DELTA]
+    assert thinking == ["hmm"]
+    assert deltas == ["ok"]
+
+
+def test_malformed_tool_call_text_is_left_alone() -> None:
+    chunks = [_chunk(parts=[SimpleNamespace(text="[Tool call: nope]", function_call=None)], finish_reason="STOP")]
+
+    events = _run_turn(_provider(), chunks)
+
+    assert not [e for e in events if e.kind is StreamEventKind.TOOL_CALLS]
+    done = next(e for e in events if e.kind is StreamEventKind.DONE)
+    assert "[Tool call: nope]" in (done.text or "")
+
+
+def test_historical_tool_turns_are_not_written_as_live_call_syntax() -> None:
+    """`[Called tool name(json)]` in history is what Gemini copies into the text channel."""
+    provider = _provider()
+    messages = [
+        ProviderMessage(role="user", content="go"),
+        ProviderMessage(
+            role="assistant",
+            tool_calls=[
+                ToolCallRequest(id="x", name="execute_python", arguments={"code": "print(1)"})
+            ],
+        ),
+        ProviderMessage(role="tool", tool_call_id="x", content="ok"),
+        ProviderMessage(role="user", content="suite"),
+    ]
+
+    blob = "\n".join(
+        (p.text or "")
+        for content in provider._to_gemini_contents(messages)
+        for p in (content.parts or [])
+    )
+    assert "[Called tool" not in blob
+    assert "[Tool call" not in blob
+    assert "execute_python" in blob
