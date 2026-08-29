@@ -23,6 +23,18 @@ from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
 
 _GEMINI_INSTALL = "npm install -g @google/gemini-cli"
 
+# Rolling aliases, not pinned versions: pinned ids rot into 404 "no longer
+# available to new users" as Google retires generations.
+_CLI_MODELS: tuple[dict[str, str], ...] = (
+    {"id": "gemini-pro-latest", "name": "Gemini Pro (latest)", "provider": "Gemini CLI"},
+    {"id": "gemini-flash-latest", "name": "Gemini Flash (latest)", "provider": "Gemini CLI"},
+    {
+        "id": "gemini-flash-lite-latest",
+        "name": "Gemini Flash Lite (latest)",
+        "provider": "Gemini CLI",
+    },
+)
+
 
 def _gemini_missing_status() -> str:
     return (
@@ -37,8 +49,13 @@ def build_gemini_argv(
     prompt: str,
     model: str,
     extra_args: str,
+    auto_approve: bool = True,
 ) -> list[str]:
-    argv = [binary, "-p", prompt, "-y", "--output-format", "stream-json"]
+    argv = [binary, "-p", prompt]
+    if auto_approve:
+        # -y approves every action, including file writes and shell commands.
+        argv.append("-y")
+    argv.extend(["--output-format", "stream-json"])
     mid = (model or "").strip()
     if mid and mid.lower() not in ("default", "auto"):
         argv.extend(["-m", mid])
@@ -159,11 +176,22 @@ class GeminiCliAdapter:
         terminal_agent=True,
         chat_api=False,
         a2a=True,
-        mcp_inject=True,
+        # headless `-p` takes no MCP flag, so launch() cannot forward the host's
+        # config — claiming injection would hide that UEFN tools are unavailable.
+        mcp_inject=False,
         needs_api_key=False,
         needs_cli=True,
         resume=False,
     )
+
+    def _auto_approve(self) -> bool:
+        try:
+            from frontend.settings import PanelSettings
+
+            cfg = coding_agent_cfg(PanelSettings.load(), self.id)
+        except Exception:
+            return True
+        return bool(cfg.get("auto_approve", True))
 
     def detect(self, settings: Any) -> CodingAgentInfo:
         cfg = coding_agent_cfg(settings, self.id)
@@ -186,11 +214,7 @@ class GeminiCliAdapter:
             cli_path=path or override,
             default_args=default_args,
             capabilities=self.capabilities,
-            models=[
-                {"id": "gemini-2.5-pro", "name": "gemini-2.5-pro", "provider": "Gemini CLI"},
-                {"id": "gemini-2.5-flash", "name": "gemini-2.5-flash", "provider": "Gemini CLI"},
-                {"id": "gemini-2.0-flash", "name": "gemini-2.0-flash", "provider": "Gemini CLI"},
-            ],
+            models=list(_CLI_MODELS),
         )
 
     def launch(
@@ -240,6 +264,7 @@ class GeminiCliAdapter:
             prompt=full_prompt,
             model=model_id,
             extra_args=extra_args,
+            auto_approve=self._auto_approve(),
         )
         state = _GeminiStream(conv_id, run_id, push)
         push({"type": "status", "text": "Starting Gemini CLI…", "conv_id": conv_id, "run_id": run_id})

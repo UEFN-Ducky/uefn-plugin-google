@@ -11,7 +11,16 @@ Install or update from **Settings → Store** in the app — do not install from
 py scripts/build_zip.py
 ```
 
-Writes `deploy/google-1.0.12.ducky-plugin.zip` (scripts/ and deploy/ are not packed).
+Writes `deploy/google-<version>.ducky-plugin.zip` (scripts/, deploy/ and tests are not packed).
+
+## Test
+
+```bash
+py -m pytest
+```
+
+`backend/conftest.py` stubs the host's `backend.agent.*` packages so the provider and
+CLI adapter can be exercised without the app.
 
 ## Secrets
 

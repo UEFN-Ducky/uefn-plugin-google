@@ -32,7 +32,7 @@ def register(api) -> None:
         "gemini",
         factory=lambda api_key, model, **kw: GeminiProvider(api_key, model, **kw),
         fetch_models=_fetch_models,
-        test_key_model="gemini-2.0-flash",
+        test_key_model="gemini-flash-latest",
         tool_schema="gemini",
         clear_model_cache=clear_model_cache,
         cache_mode="implicit",
@@ -42,7 +42,12 @@ def register(api) -> None:
         factory=lambda: GeminiCliAdapter(),
         aliases=["gemini", "google_gemini"],
         skills_dir=_skills_dir,
-        settings_defaults={"enabled": True, "cli_path": "", "default_args": ""},
+        settings_defaults={
+            "enabled": True,
+            "cli_path": "",
+            "default_args": "",
+            "auto_approve": True,
+        },
         install_help=_INSTALL_HELP,
         token_provider="gemini",
     )
