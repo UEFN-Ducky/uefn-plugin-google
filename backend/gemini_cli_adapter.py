@@ -23,17 +23,27 @@ from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
 
 _GEMINI_INSTALL = "npm install -g @google/gemini-cli"
 
-# Rolling aliases, not pinned versions: pinned ids rot into 404 "no longer
-# available to new users" as Google retires generations.
-_CLI_MODELS: tuple[dict[str, str], ...] = (
-    {"id": "gemini-pro-latest", "name": "Gemini Pro (latest)", "provider": "Gemini CLI"},
-    {"id": "gemini-flash-latest", "name": "Gemini Flash (latest)", "provider": "Gemini CLI"},
-    {
-        "id": "gemini-flash-lite-latest",
-        "name": "Gemini Flash Lite (latest)",
-        "provider": "Gemini CLI",
-    },
-)
+
+def _gemini_cli_model_rows() -> list[dict[str, str]]:
+    """Live Gemini models.list — empty if the key is missing or the catalog call fails."""
+    try:
+        from backend.agent.secrets import get_key
+
+        key = (get_key("gemini") or "").strip()
+    except Exception:
+        return []
+    if not key:
+        return []
+    try:
+        from .model_fetch import fetch_models
+
+        return [
+            {"id": info.id, "name": info.display_name or info.id, "provider": "Gemini CLI"}
+            for info in fetch_models(key)
+            if info.id
+        ]
+    except Exception:
+        return []
 
 
 def _gemini_missing_status() -> str:
@@ -214,7 +224,7 @@ class GeminiCliAdapter:
             cli_path=path or override,
             default_args=default_args,
             capabilities=self.capabilities,
-            models=list(_CLI_MODELS),
+            models=_gemini_cli_model_rows(),
         )
 
     def launch(

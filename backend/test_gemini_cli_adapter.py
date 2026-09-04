@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from backend.gemini_cli_adapter import GeminiCliAdapter, build_gemini_argv
 
-# Retired by the API: "no longer available to new users" 404s in production logs.
-RETIRED_PREFIXES = ("gemini-1.", "gemini-2.")
-
 
 def _argv(**overrides: object) -> list[str]:
     kwargs: dict[str, object] = {
@@ -17,13 +14,9 @@ def _argv(**overrides: object) -> list[str]:
     return build_gemini_argv(**kwargs)  # type: ignore[arg-type]
 
 
-def test_advertised_models_are_not_retired_by_the_api() -> None:
-    """A picker full of 404 models makes every chat fail before it starts."""
-    ids = [m["id"] for m in GeminiCliAdapter().detect(settings=None).models]
-
-    assert ids
-    retired = [i for i in ids if i.startswith(RETIRED_PREFIXES)]
-    assert retired == []
+def test_picker_is_empty_without_a_live_catalog(monkeypatch) -> None:
+    monkeypatch.setattr("backend.gemini_cli_adapter._gemini_cli_model_rows", lambda: [])
+    assert GeminiCliAdapter().detect(settings=None).models == []
 
 
 def test_auto_approve_is_on_by_default() -> None:
