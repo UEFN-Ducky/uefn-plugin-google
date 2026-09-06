@@ -48,8 +48,9 @@ def _gemini_cli_model_rows() -> list[dict[str, str]]:
 
 def _gemini_missing_status() -> str:
     return (
-        "Gemini CLI not found — needs the `gemini` terminal command. "
-        f"Install: {_GEMINI_INSTALL}. Then run gemini --version, restart Ducky, and click Detect."
+        "Gemini CLI not found — Ducky will install it automatically. "
+        "If this stays, send another message or Settings → Store → Update Google. "
+        f"Manual fallback: {_GEMINI_INSTALL}"
     )
 
 
@@ -210,7 +211,15 @@ class GeminiCliAdapter:
         path = which_cli("gemini", override)
         default_args = str(cfg.get("default_args") or "")
         if path:
+            from .cli_update import read_cli_version, status_text
+
+            ver = read_cli_version(path)
+            extra = status_text()
             status = f"Found: {path}"
+            if ver:
+                status += f" · v{ver}"
+            if extra and extra not in status:
+                status += f" · {extra}"
             available = enabled
         else:
             status = _gemini_missing_status()
@@ -254,7 +263,26 @@ class GeminiCliAdapter:
                 error="No Gemini CLI model selected. Pick a concrete model for this chat.",
                 status="error",
             )
-        binary = which_cli("gemini", cli_path) or "gemini"
+        from .cli_update import resolve_bin, should_heal_launch, update_cli
+
+        binary = resolve_bin(cli_path)
+        if not binary:
+            push(
+                {
+                    "type": "status",
+                    "text": "Gemini CLI missing — installing automatically…",
+                    "conv_id": conv_id,
+                    "run_id": run_id,
+                }
+            )
+            upd = update_cli(cli_path)
+            binary = resolve_bin(cli_path) or str(upd.get("cli_path") or "")
+            if not binary:
+                return CodingAgentLaunchResult(
+                    ok=False,
+                    error=str(upd.get("error") or "Gemini CLI not found and auto-install failed"),
+                    status="error",
+                )
         full_prompt = prompt
         if system_prompt.strip():
             full_prompt = system_prompt.strip() + "\n\n" + prompt
@@ -289,9 +317,58 @@ class GeminiCliAdapter:
         )
         streamed_all = "".join(state.text_parts).strip()
         reply = streamed_all
-        return finalize_cli_turn(
+        result = finalize_cli_turn(
             proc=proc,
             reply=reply,
+            streamed=bool(streamed_all) or bool(state.blocks),
+            blocks=state.blocks,
+            session_id="",
+            new_session=state.session_id,
+            usage=state.usage,
+            agent_label="Gemini CLI",
+            timeout_s=timeout_s,
+            error_text=state.error_text,
+        )
+        if result.ok or not should_heal_launch(
+            result.error or "",
+            result.reply_text or "",
+            proc.stderr_tail,
+            proc.raw_tail,
+            state.error_text,
+        ):
+            return result
+        push(
+            {
+                "type": "status",
+                "text": "Gemini CLI is stale or missing — updating automatically…",
+                "conv_id": conv_id,
+                "run_id": run_id,
+            }
+        )
+        upd = update_cli(binary)
+        if not upd.get("ok"):
+            result.error = (
+                (result.error or "")
+                + "\n\nDucky tried to update Gemini CLI automatically and failed: "
+                + str(upd.get("error") or "unknown")
+            )
+            return result
+        binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
+        argv[0] = binary
+        state = _GeminiStream(conv_id, run_id, push)
+        proc = run_streaming_process(
+            argv=argv,
+            cwd=cwd,
+            env_extra=env,
+            conv_id=conv_id,
+            on_line=state.on_line,
+            timeout_s=timeout_s,
+            cancel=cancel,
+        )
+        streamed_all = "".join(state.text_parts).strip()
+        return finalize_cli_turn(
+            proc=proc,
+            reply=streamed_all,
             streamed=bool(streamed_all) or bool(state.blocks),
             blocks=state.blocks,
             session_id="",

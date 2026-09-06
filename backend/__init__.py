@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Any
 
 _INSTALL_HELP = (
-    "Needs the Gemini CLI (`gemini` in PowerShell) — npm install -g @google/gemini-cli. "
-    "Uses this provider’s Google API key when saved, or an existing Gemini CLI login. "
-    "Ducky runs headless `gemini -p` so replies return to chat. Run gemini --version, restart Ducky, and click Detect."
+    "Ducky installs and updates the Gemini CLI when this plugin is installed or "
+    "updated — you should not run npm yourself. Uses this provider’s Google API "
+    "key when saved, or an existing Gemini CLI login."
 )
 
 
@@ -52,4 +52,10 @@ def register(api) -> None:
         token_provider="gemini",
     )
     api.register_ide_hookup("antigravity", label="Antigravity")
+    try:
+        from .cli_update import schedule_cli_update_on_plugin_load
+
+        schedule_cli_update_on_plugin_load()
+    except Exception:
+        pass
     api.log("Google gateway contribution active (Providers + Gemini CLI + Antigravity IDE)")
