@@ -1,7 +1,7 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "label": "Google",
   "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings → LLMs → Providers & Keys, and Gemini CLI under Coding Agents.",
   "min_app_version": "1.0.523",
@@ -37,12 +37,34 @@
       "title": "Set up Google Gemini",
       "auto_start": "first_enable",
       "settings_tab": "LLMs",
+      "provider_id": "gemini",
       "steps": [
         {
-          "target": "settings.llms.section.llms",
-          "title": "Providers & Keys",
-          "body": "Google Gemini lives under Settings → LLMs. Open Providers & Keys to paste your API key and turn on Gemini CLI.",
+          "target": "settings.llms.provider.gemini",
+          "title": "Open Google",
+          "body": "Press the Google row in this table. The page slides open so you can paste a key or use Gemini CLI.",
           "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.key",
+          "title": "API key or Gemini CLI",
+          "body": "Paste your Google Gemini API key here. No key? Skip this and use Gemini CLI on this same slide.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.save",
+          "title": "Test & Save",
+          "body": "Press Test & Save after you paste a key. Using Gemini CLI without a key? Press Skip.",
+          "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.agent",
+          "title": "Gemini CLI",
+          "body": "Gemini CLI is Google's coding agent. Detect finds the CLI. Keep it on to pick Gemini CLI in chat.",
+          "advance": "next",
           "mode": "rect"
         }
       ]
