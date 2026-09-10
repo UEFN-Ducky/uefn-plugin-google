@@ -1,7 +1,7 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "label": "Google",
   "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings → LLMs → Providers & Keys, and Gemini CLI under Coding Agents.",
   "min_app_version": "1.0.523",
@@ -61,10 +61,38 @@
           "mode": "rect"
         },
         {
+          "target": "settings.llms.provider.ide",
+          "title": "IDE / MCP connection",
+          "body": "IDE / MCP wires UEFN tools and Ducky skills into Antigravity. Apply once, then Test. Green check = connected.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.ide.apply",
+          "title": "Apply connection",
+          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Antigravity. Then Test — a green check means connected.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
           "target": "settings.llms.provider.agent",
           "title": "Gemini CLI",
           "body": "Gemini CLI is Google's coding agent. Detect finds the CLI. Keep it on to pick Gemini CLI in chat.",
           "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.agent.detect",
+          "title": "Detect CLI",
+          "body": "Press Detect to find Gemini CLI on this machine. Leave the toggle on so it appears in the chat picker.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.back",
+          "title": "Back",
+          "body": "Press Back to return to the provider list.",
+          "advance": "require_click",
           "mode": "rect"
         }
       ]
