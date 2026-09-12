@@ -143,6 +143,8 @@ def _gemini_info_from_model(
         (price_in, price_out, cached, None),
         _resolve_gemini_price(pricing_catalog or {}, name),
     )
+    from .gemini_provider import gemini_supports_thinking
+
     return ModelInfo(
         id=name,
         display_name=str(getattr(m, "display_name", None) or name),
@@ -152,6 +154,7 @@ def _gemini_info_from_model(
         price_in=price_in,
         price_out=price_out,
         price_cached_in=cached,
+        supports_thinking_effort=gemini_supports_thinking(name),
     )
 
 

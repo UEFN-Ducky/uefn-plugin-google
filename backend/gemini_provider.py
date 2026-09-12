@@ -15,7 +15,32 @@ from backend.agent.providers.base import (
     ToolCallRequest,
 )
 from backend.agent.providers.cache_utils import parse_gemini_usage
+from backend.agent.thinking_effort import EFFORT_BUDGET, normalize_thinking_effort
 from .schema_sanitize import sanitize_gemini_schema
+
+
+def gemini_supports_thinking(model: str) -> bool:
+    mid = (model or "").strip().lower()
+    return "gemini-2.5" in mid or "gemini-2-5" in mid or "gemini-3" in mid
+
+
+def gemini_thinking_config(model: str, thinking_effort: str) -> dict[str, Any] | None:
+    """Gemini 3.x uses thinking_level; 2.5 uses thinking_budget."""
+    if not gemini_supports_thinking(model):
+        return None
+    mid = (model or "").strip().lower()
+    effort = normalize_thinking_effort(thinking_effort)
+    is_3 = "gemini-3" in mid
+    if is_3:
+        if effort == "off":
+            return None
+        level = "high" if ("pro" in mid and effort == "medium") else effort
+        return {"thinking_level": level}
+    if effort == "off":
+        if "pro" in mid:
+            return None
+        return {"thinking_budget": 0}
+    return {"thinking_budget": EFFORT_BUDGET.get(effort, 8192)}
 
 # Gemini (lite / thinking, especially) sometimes writes the call as text
 # instead of a functionCall part — then the turn looks finished and the user
@@ -121,9 +146,10 @@ def _merge_tool_calls(
 
 
 class GeminiProvider:
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, *, thinking_effort: str = "off", **_kw: Any) -> None:
         self._api_key = api_key
         self._model = model
+        self._thinking_effort = normalize_thinking_effort(thinking_effort)
         # Raw model Content objects from function_call responses in the current
         # tool-loop turn, preserving thought_signatures for thinking models.
         self._fc_contents: list[Any] = []
@@ -266,13 +292,17 @@ class GeminiProvider:
         finish_reason = ""
         native_function_call = False
 
+        config: dict[str, Any] = {
+            "system_instruction": system,
+            "tools": gemini_tools if gemini_tools else None,
+        }
+        thinking = gemini_thinking_config(self._model, self._thinking_effort)
+        if thinking:
+            config["thinking_config"] = thinking
         response = client.models.generate_content_stream(
             model=self._model,
             contents=self._to_gemini_contents(messages),
-            config={
-                "system_instruction": system,
-                "tools": gemini_tools if gemini_tools else None,
-            },
+            config=config,
         )
         for chunk in response:
             if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():

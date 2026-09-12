@@ -64,6 +64,7 @@ class ModelInfo:
     price_in: float | None = None
     price_out: float | None = None
     price_cached_in: float | None = None
+    supports_thinking_effort: bool | None = None
 
 
 @dataclass
@@ -146,6 +147,19 @@ def _install_host_stubs() -> None:
         _cache_put=lambda cache, key, value: cache.__setitem__(key, value),
         _float_from_record=lambda record, *keys: None,
         _merge_prices=lambda primary, fallback: fallback or primary,
+    )
+    def _normalize_thinking_effort(value: str | None) -> str:
+        v = (value or "").strip().lower()
+        if v in ("", "off", "none", "0"):
+            return "off"
+        if v in ("low", "medium", "high"):
+            return v
+        return "off"
+
+    _module(
+        "backend.agent.thinking_effort",
+        EFFORT_BUDGET={"low": 2048, "medium": 8192, "high": 16384},
+        normalize_thinking_effort=_normalize_thinking_effort,
     )
     _module("backend.agent.secrets", get_key=lambda name: "", has_key=lambda name: False)
     _module(

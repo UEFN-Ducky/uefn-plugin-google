@@ -36,6 +36,7 @@ def register(api) -> None:
         tool_schema="gemini",
         clear_model_cache=clear_model_cache,
         cache_mode="implicit",
+        shows_thinking_effort=True,
     )
     api.register_coding_agent(
         "gemini_cli",
