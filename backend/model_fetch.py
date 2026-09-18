@@ -6,6 +6,7 @@ import html
 import logging
 import re
 import time
+from dataclasses import fields
 from typing import Any
 
 from backend.agent.model_fetch import (
@@ -18,6 +19,12 @@ from backend.agent.model_fetch import (
 
 _log = logging.getLogger(__name__)
 _CACHE_TTL_S = 6 * 3600.0
+_MODEL_INFO_FIELDS = {f.name for f in fields(ModelInfo)}
+
+
+def _model_info(**kw: Any) -> ModelInfo:
+    """Drop unknown fields so an older host ModelInfo does not TypeError."""
+    return ModelInfo(**{k: v for k, v in kw.items() if k in _MODEL_INFO_FIELDS})
 
 
 _GEMINI_PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
@@ -143,9 +150,9 @@ def _gemini_info_from_model(
         (price_in, price_out, cached, None),
         _resolve_gemini_price(pricing_catalog or {}, name),
     )
-    from .gemini_provider import gemini_supports_thinking
+    from .gemini_provider import gemini_supports_thinking, thinking_menu
 
-    return ModelInfo(
+    return _model_info(
         id=name,
         display_name=str(getattr(m, "display_name", None) or name),
         supports_vision=vision,
@@ -155,6 +162,7 @@ def _gemini_info_from_model(
         price_out=price_out,
         price_cached_in=cached,
         supports_thinking_effort=gemini_supports_thinking(name),
+        thinking_menu=thinking_menu(name),
     )
 
 

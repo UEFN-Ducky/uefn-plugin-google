@@ -15,13 +15,42 @@ from backend.agent.providers.base import (
     ToolCallRequest,
 )
 from backend.agent.providers.cache_utils import parse_gemini_usage
-from backend.agent.thinking_effort import EFFORT_BUDGET, normalize_thinking_effort
+from backend.agent.thinking_effort import normalize_thinking_effort
 from .schema_sanitize import sanitize_gemini_schema
+
+BUDGET = {"low": 2048, "medium": 8192, "high": 16384}
 
 
 def gemini_supports_thinking(model: str) -> bool:
     mid = (model or "").strip().lower()
     return "gemini-2.5" in mid or "gemini-2-5" in mid or "gemini-3" in mid
+
+
+def thinking_menu(model: str) -> dict | None:
+    if not gemini_supports_thinking(model):
+        return None
+    mid = (model or "").strip().lower()
+    if "gemini-3" in mid:
+        return {
+            "lo": "Faster",
+            "hi": "Smarter",
+            "levels": [
+                {"id": "off", "label": "Off", "thinking_tokens": 0, "hint": "No extended thinking"},
+                {"id": "low", "label": "Low", "thinking_tokens": None, "hint": "thinking_level=low, no token cap"},
+                {"id": "medium", "label": "Med", "thinking_tokens": None, "hint": "thinking_level=medium, no token cap"},
+                {"id": "high", "label": "High", "thinking_tokens": None, "hint": "thinking_level=high, no token cap"},
+            ],
+        }
+    return {
+        "lo": "Faster",
+        "hi": "Smarter",
+        "levels": [
+            {"id": "off", "label": "Off", "thinking_tokens": 0, "hint": "thinking_budget=0"},
+            {"id": "low", "label": "Low", "thinking_tokens": BUDGET["low"], "hint": f"{BUDGET['low']} thinking tokens"},
+            {"id": "medium", "label": "Med", "thinking_tokens": BUDGET["medium"], "hint": f"{BUDGET['medium']} thinking tokens"},
+            {"id": "high", "label": "High", "thinking_tokens": BUDGET["high"], "hint": f"{BUDGET['high']} thinking tokens"},
+        ],
+    }
 
 
 def gemini_thinking_config(model: str, thinking_effort: str) -> dict[str, Any] | None:
@@ -40,7 +69,7 @@ def gemini_thinking_config(model: str, thinking_effort: str) -> dict[str, Any] |
         if "pro" in mid:
             return None
         return {"thinking_budget": 0}
-    return {"thinking_budget": EFFORT_BUDGET.get(effort, 8192)}
+    return {"thinking_budget": BUDGET.get(effort, 8192)}
 
 # Gemini (lite / thinking, especially) sometimes writes the call as text
 # instead of a functionCall part — then the turn looks finished and the user

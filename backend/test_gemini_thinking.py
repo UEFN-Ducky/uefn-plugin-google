@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.gemini_provider import gemini_supports_thinking, gemini_thinking_config
+from backend.gemini_provider import gemini_supports_thinking, gemini_thinking_config, thinking_menu
 
 
 def test_gemini_thinking_config() -> None:
@@ -13,3 +13,7 @@ def test_gemini_thinking_config() -> None:
     assert gemini_thinking_config("gemini-2.5-flash", "off") == {"thinking_budget": 0}
     assert gemini_thinking_config("gemini-2.5-pro", "off") is None
     assert gemini_thinking_config("gemini-2.5-flash", "high") == {"thinking_budget": 16384}
+    flash = thinking_menu("gemini-2.5-flash")
+    assert flash and flash["levels"][0]["thinking_tokens"] == 0
+    assert flash["levels"][-1]["thinking_tokens"] == 16384
+    assert thinking_menu("gemini-3.7-flash")["levels"][0]["id"] == "off"
