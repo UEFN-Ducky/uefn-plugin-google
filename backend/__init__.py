@@ -18,6 +18,12 @@ def _fetch_models(api_key: str, **_kw: Any) -> Any:
     return fetch_models(api_key)
 
 
+def _fetch_usage(api_key: str, **kw: Any) -> Any:
+    from .usage import fetch_usage
+
+    return fetch_usage(api_key, model=str(kw.get("model") or ""))
+
+
 def _skills_dir() -> str:
     return str(Path.home() / ".claude" / "skills")
 
@@ -32,6 +38,7 @@ def register(api) -> None:
         "gemini",
         factory=lambda api_key, model, **kw: GeminiProvider(api_key, model, **kw),
         fetch_models=_fetch_models,
+        fetch_usage=_fetch_usage,
         test_key_model="gemini-flash-latest",
         tool_schema="gemini",
         clear_model_cache=clear_model_cache,
