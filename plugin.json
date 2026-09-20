@@ -1,9 +1,9 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.28",
+  "version": "1.0.29",
   "label": "Google",
-  "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings → LLMs → Providers & Keys, and Gemini CLI under Coding Agents.",
+  "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings \u2192 LLMs \u2192 Providers & Keys, and Gemini CLI under Coding Agents.",
   "min_app_version": "1.2.45",
   "default_enabled": true,
   "secret_keys": [
@@ -70,7 +70,7 @@
         {
           "target": "settings.llms.provider.ide.apply",
           "title": "Apply connection",
-          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Antigravity. Then Test — a green check means connected.",
+          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Antigravity. Then Test \u2014 a green check means connected.",
           "advance": "next",
           "mode": "rect"
         },
@@ -94,6 +94,111 @@
           "body": "Press Back to return to the provider list.",
           "advance": "require_click",
           "mode": "rect"
+        }
+      ]
+    },
+    "automations": {
+      "nodes": [
+        {
+          "id": "google.complete",
+          "label": "Google complete",
+          "group": "Google",
+          "description": "One-shot prompt through the Google gateway. Writes text onto the run.",
+          "config_fields": [
+            {
+              "id": "prompt",
+              "label": "Prompt",
+              "type": "textarea"
+            },
+            {
+              "id": "model",
+              "label": "Model",
+              "type": "model",
+              "provider": "gemini"
+            }
+          ]
+        },
+        {
+          "id": "google.image",
+          "label": "Google image",
+          "group": "Google",
+          "description": "Generate an image with Imagen.",
+          "config_fields": [
+            {
+              "id": "prompt",
+              "label": "Prompt",
+              "type": "textarea"
+            },
+            {
+              "id": "model",
+              "label": "Model",
+              "type": "select",
+              "options": [
+                {
+                  "id": "imagen-4.0-generate-001",
+                  "label": "imagen-4.0-generate-001"
+                },
+                {
+                  "id": "imagen-3.0-generate-002",
+                  "label": "imagen-3.0-generate-002"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "templates": [
+        {
+          "id": "google-complete",
+          "label": "Google complete",
+          "icon": "\u2728",
+          "systems": [
+            "pipeline"
+          ],
+          "description": "Chat prompt through Google, then finish.",
+          "graph": {
+            "nodes": [
+              {
+                "id": "s",
+                "type": "start.chat",
+                "x": 40,
+                "y": 80,
+                "config": {},
+                "label": "Chat",
+                "description": ""
+              },
+              {
+                "id": "c",
+                "type": "google.complete",
+                "x": 280,
+                "y": 80,
+                "config": {},
+                "label": "Complete",
+                "description": ""
+              },
+              {
+                "id": "f",
+                "type": "pipeline.finish",
+                "x": 520,
+                "y": 80,
+                "config": {},
+                "label": "Finish",
+                "description": ""
+              }
+            ],
+            "edges": [
+              {
+                "source": "s",
+                "target": "c",
+                "kind": "main"
+              },
+              {
+                "source": "c",
+                "target": "f",
+                "kind": "main"
+              }
+            ]
+          }
         }
       ]
     }
