@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shlex
 import threading
+from pathlib import Path
 from typing import Any
 
 from backend.agent.coding_agents.base import (
@@ -54,6 +55,26 @@ def _gemini_missing_status() -> str:
     )
 
 
+def gemini_include_dirs(cwd: str) -> list[str]:
+    """Added projects besides cwd, for --include-directories."""
+    try:
+        from frontend.ui_web.recent_projects import load_recent_projects
+    except Exception:
+        return []
+    import os
+
+    cwd_key = os.path.normcase(str(Path(cwd).resolve()))
+    out: list[str] = []
+    for item in load_recent_projects():
+        path = Path(item)
+        if not path.is_dir():
+            continue
+        if os.path.normcase(str(path.resolve())) == cwd_key:
+            continue
+        out.append(str(path))
+    return out
+
+
 def build_gemini_argv(
     *,
     binary: str,
@@ -61,11 +82,14 @@ def build_gemini_argv(
     model: str,
     extra_args: str,
     auto_approve: bool = True,
+    include_dirs: list[str] | None = None,
 ) -> list[str]:
     argv = [binary, "-p", prompt]
     if auto_approve:
         # -y approves every action, including file writes and shell commands.
         argv.append("-y")
+    for directory in include_dirs or []:
+        argv.extend(["--include-directories", directory])
     argv.extend(["--output-format", "stream-json"])
     mid = (model or "").strip()
     if mid and mid.lower() not in ("default", "auto"):
@@ -303,6 +327,7 @@ class GeminiCliAdapter:
             model=model_id,
             extra_args=extra_args,
             auto_approve=self._auto_approve(),
+            include_dirs=gemini_include_dirs(cwd),
         )
         state = _GeminiStream(conv_id, run_id, push)
         push({"type": "status", "text": "Starting Gemini CLI…", "conv_id": conv_id, "run_id": run_id})

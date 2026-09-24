@@ -28,6 +28,11 @@ def test_auto_approve_can_be_turned_off() -> None:
     assert "-y" not in _argv(auto_approve=False)
 
 
+def test_include_directories_lists_added_projects() -> None:
+    argv = _argv(include_dirs=[r"C:\Fortnite\Roguelike"])
+    assert argv[argv.index("--include-directories") + 1] == r"C:\Fortnite\Roguelike"
+
+
 def test_model_and_extra_args_still_reach_the_cli() -> None:
     argv = _argv(model="gemini-pro-latest", extra_args="--debug")
 
