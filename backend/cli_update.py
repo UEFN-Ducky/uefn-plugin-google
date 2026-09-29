@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -106,6 +107,41 @@ def _env() -> dict[str, str]:
         return dict(os.environ)
 
 
+def hidden_run_kwargs() -> dict[str, Any]:
+    """No console. npm.cmd still flashes — call npm through npm_argv()."""
+    if os.name != "nt":
+        return {}
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": info,
+    }
+
+
+def npm_argv(npm: str, args: list[str]) -> list[str]:
+    """node.exe + npm-cli.js. npm.cmd is a batch file and opens a console."""
+    bases: list[Path] = [Path(npm).parent]
+    found = shutil.which("node")
+    if found:
+        bases.append(Path(found).parent)
+    seen: set[str] = set()
+    for base in bases:
+        key = str(base).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        node = base / "node.exe"
+        if not node.is_file():
+            alt = base / "node"
+            node = alt if alt.is_file() else node
+        cli = base / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        if node.is_file() and cli.is_file():
+            return [str(node), str(cli), *args]
+    return [npm, *args]
+
+
 def _run(argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[str]:
     kwargs: dict[str, Any] = {
         "capture_output": True,
@@ -115,8 +151,7 @@ def _run(argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[st
         "errors": "replace",
         "env": _env(),
     }
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    kwargs.update(hidden_run_kwargs())
     return subprocess.run(argv, **kwargs)
 
 
@@ -138,7 +173,7 @@ def _npm_install() -> dict[str, Any]:
     if not npm:
         return {"ok": False, "error": "npm not found — Ducky cannot install Gemini CLI without Node.js"}
     try:
-        proc = _run([npm, "install", "-g", _NPM_PKG], timeout_s=300)
+        proc = _run(npm_argv(npm, ["install", "-g", _NPM_PKG]), timeout_s=300)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
