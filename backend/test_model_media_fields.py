@@ -35,9 +35,14 @@ def test_max_images_camel_case_key():
     assert _gemini_info_from_model(_model({"maxImages": 16, "input_modalities": ["TEXT"]})).max_images == 16
 
 
-def test_modalities_listed_without_video_audio_are_false():
+def test_input_modalities_without_video_audio_are_false():
     info = _gemini_info_from_model(_model({"input_modalities": ["TEXT", "IMAGE"]}))
     assert (info.supports_video, info.supports_audio) == (False, False)
+
+
+def test_output_modalities_never_count_as_input():
+    info = _gemini_info_from_model(_model({"output_modalities": ["TEXT", "VIDEO", "AUDIO"]}))
+    assert (info.supports_video, info.supports_audio) == (None, None)
 
 
 def test_media_fields_unknown_without_modality_data():

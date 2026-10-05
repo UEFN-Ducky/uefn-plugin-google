@@ -112,13 +112,13 @@ def _value_mentions(value: Any, word: str) -> bool:
     return False
 
 
-def _record_mentions_modality(record: dict[str, Any], word: str) -> bool:
+def _record_mentions_modality(record: dict[str, Any], word: str, *, input_only: bool = False) -> bool:
     for key, value in record.items():
         kl = str(key).lower()
-        if "modality" in kl or "modalities" in kl:
+        if "modalit" in kl and (not input_only or "input" in kl):
             if _value_mentions(value, word):
                 return True
-        if isinstance(value, dict) and _record_mentions_modality(value, word):
+        if isinstance(value, dict) and _record_mentions_modality(value, word, input_only=input_only):
             return True
     return False
 
@@ -128,10 +128,10 @@ def _record_mentions_image_modalities(record: dict[str, Any]) -> bool:
 
 
 def _record_has_modalities(record: dict[str, Any]) -> bool:
-    """True when the record carries any modality field (so absence of a word means no)."""
+    """True when the record carries an input-modality field (so absence of a word means no)."""
     for key, value in record.items():
         kl = str(key).lower()
-        if ("modality" in kl or "modalities" in kl) and value:
+        if "modalit" in kl and "input" in kl and value:
             return True
         if isinstance(value, dict) and _record_has_modalities(value):
             return True
@@ -164,8 +164,8 @@ def _gemini_info_from_model(
             dump = {}
     vision = _record_mentions_image_modalities(dump) if dump else False
     known_modalities = _record_has_modalities(dump) if dump else False
-    video = _record_mentions_modality(dump, "video") if known_modalities else None
-    audio = _record_mentions_modality(dump, "audio") if known_modalities else None
+    video = _record_mentions_modality(dump, "video", input_only=True) if known_modalities else None
+    audio = _record_mentions_modality(dump, "audio", input_only=True) if known_modalities else None
     ctx = getattr(m, "input_token_limit", None)
     context_limit = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else None
     tools = "generateContent" in actions if actions else False
