@@ -166,6 +166,14 @@ def _gemini_info_from_model(
     known_modalities = _record_has_modalities(dump) if dump else False
     video = _record_mentions_modality(dump, "video", input_only=True) if known_modalities else None
     audio = _record_mentions_modality(dump, "audio", input_only=True) if known_modalities else None
+    if not known_modalities and name.startswith("gemini-"):
+        # The SDK's Model record has no modality fields; Google documents every
+        # Gemini generateContent model as taking image, video and audio input.
+        # Live API / omni (video-generation) models are not chat understanding.
+        vision = True
+        if "-live" not in name and "omni" not in name:
+            video = True
+            audio = True
     ctx = getattr(m, "input_token_limit", None)
     context_limit = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else None
     tools = "generateContent" in actions if actions else False
