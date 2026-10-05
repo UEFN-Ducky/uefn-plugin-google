@@ -64,6 +64,9 @@ class ModelInfo:
     price_in: float | None = None
     price_out: float | None = None
     price_cached_in: float | None = None
+    max_images: int | None = None
+    supports_video: bool | None = None
+    supports_audio: bool | None = None
     supports_thinking_effort: bool | None = None
     thinking_menu: dict | None = None
 
