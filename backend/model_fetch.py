@@ -100,27 +100,50 @@ def _fetch_gemini_pricing_catalog() -> dict[str, _PricingRow]:
     return catalog
 
 
-def _value_mentions_image(value: Any) -> bool:
+def _value_mentions(value: Any, word: str) -> bool:
     if isinstance(value, str):
-        return "image" in value.lower()
+        return word in value.lower()
     if isinstance(value, list):
-        return any(_value_mentions_image(v) for v in value)
+        return any(_value_mentions(v, word) for v in value)
     if isinstance(value, dict):
-        return any(_value_mentions_image(v) for v in value.values()) or any(
-            "image" in str(k).lower() for k in value.keys()
+        return any(_value_mentions(v, word) for v in value.values()) or any(
+            word in str(k).lower() for k in value.keys()
         )
     return False
 
 
-def _record_mentions_image_modalities(record: dict[str, Any]) -> bool:
+def _record_mentions_modality(record: dict[str, Any], word: str, *, input_only: bool = False) -> bool:
     for key, value in record.items():
         kl = str(key).lower()
-        if "modality" in kl or "modalities" in kl:
-            if _value_mentions_image(value):
+        if "modalit" in kl and (not input_only or "input" in kl):
+            if _value_mentions(value, word):
                 return True
-        if isinstance(value, dict) and _record_mentions_image_modalities(value):
+        if isinstance(value, dict) and _record_mentions_modality(value, word, input_only=input_only):
             return True
     return False
+
+
+def _record_mentions_image_modalities(record: dict[str, Any]) -> bool:
+    return _record_mentions_modality(record, "image")
+
+
+def _record_has_modalities(record: dict[str, Any]) -> bool:
+    """True when the record carries an input-modality field (so absence of a word means no)."""
+    for key, value in record.items():
+        kl = str(key).lower()
+        if "modalit" in kl and "input" in kl and value:
+            return True
+        if isinstance(value, dict) and _record_has_modalities(value):
+            return True
+    return False
+
+
+def _max_images_from_record(record: dict[str, Any]) -> int | None:
+    for key in ("max_images", "maxImages"):
+        val = record.get(key)
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+    return None
 
 
 def _gemini_info_from_model(
@@ -140,6 +163,17 @@ def _gemini_info_from_model(
         except Exception:
             dump = {}
     vision = _record_mentions_image_modalities(dump) if dump else False
+    known_modalities = _record_has_modalities(dump) if dump else False
+    video = _record_mentions_modality(dump, "video", input_only=True) if known_modalities else None
+    audio = _record_mentions_modality(dump, "audio", input_only=True) if known_modalities else None
+    if not known_modalities and name.startswith("gemini-"):
+        # The SDK's Model record has no modality fields; Google documents every
+        # Gemini generateContent model as taking image, video and audio input.
+        # Live API / omni (video-generation) models are not chat understanding.
+        vision = True
+        if "-live" not in name and "omni" not in name:
+            video = True
+            audio = True
     ctx = getattr(m, "input_token_limit", None)
     context_limit = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else None
     tools = "generateContent" in actions if actions else False
@@ -156,6 +190,9 @@ def _gemini_info_from_model(
         id=name,
         display_name=str(getattr(m, "display_name", None) or name),
         supports_vision=vision,
+        max_images=_max_images_from_record(dump),
+        supports_video=video,
+        supports_audio=audio,
         supports_tools=tools,
         context_limit=context_limit,
         price_in=price_in,
