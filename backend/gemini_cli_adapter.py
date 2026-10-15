@@ -90,6 +90,10 @@ def build_gemini_argv(
         argv.append("-y")
     for directory in include_dirs or []:
         argv.extend(["--include-directories", directory])
+    # Ducky's tools only. Gemini merges a project's .gemini/settings.json servers in, and
+    # Epic's ModelContextProtocol.GenerateClientConfig writes one with unreal-mcp: a line
+    # to the editor past Ducky.
+    argv.extend(["--allowed-mcp-server-names", "uefn"])
     argv.extend(["--output-format", "stream-json"])
     mid = (model or "").strip()
     if mid and mid.lower() not in ("default", "auto"):

@@ -51,6 +51,10 @@ def test_auto_approve_is_exposed_as_a_setting() -> None:
 def test_mcp_injection_is_only_advertised_when_the_config_reaches_the_cli() -> None:
     """launch() drops mcp_config_path, so claiming mcp_inject hides missing tools."""
     argv = build_gemini_argv(binary="gemini", prompt="x", model="m", extra_args="")
-    config_reaches_cli = any("mcp" in arg.lower() for arg in argv)
+    allow_list = argv[argv.index("--allowed-mcp-server-names") + 1]
+    # The allow-list only narrows which servers load; it hands the CLI no Ducky config.
+    config_reaches_cli = any(
+        "mcp" in arg.lower() for arg in argv if arg not in ("--allowed-mcp-server-names", allow_list)
+    )
 
     assert GeminiCliAdapter.capabilities.mcp_inject is config_reaches_cli

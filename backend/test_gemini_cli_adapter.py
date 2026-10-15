@@ -40,3 +40,12 @@ def test_model_and_extra_args_still_reach_the_cli() -> None:
     assert "salut" in argv
     assert argv[argv.index("-m") + 1] == "gemini-pro-latest"
     assert "--debug" in argv
+
+
+def test_only_duckys_mcp_server_may_load() -> None:
+    # Gemini merges a project's .gemini/settings.json servers in; Epic's
+    # ModelContextProtocol.GenerateClientConfig writes one with unreal-mcp.
+    argv = _argv()
+    at = argv.index("--allowed-mcp-server-names")
+    assert argv[at + 1] == "uefn"
+    assert argv[at + 2].startswith("--")
