@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 from cli_update import (
@@ -42,7 +43,8 @@ def test_plugin_wires_auto_update():
     adapter = Path(__file__).with_name("gemini_cli_adapter.py").read_text(encoding="utf-8")
     assert "schedule_cli_update_on_plugin_load" in init
     assert "update_cli" in adapter
-    assert plugin_package_version() == "1.0.31"
+    manifest = json.loads(Path(__file__).resolve().parents[1].joinpath("plugin.json").read_text(encoding="utf-8"))
+    assert plugin_package_version() == manifest["version"]
 
 
 if __name__ == "__main__":

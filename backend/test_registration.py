@@ -4,7 +4,9 @@ from typing import Any
 
 from backend import register
 from backend.gemini_cli_adapter import GeminiCliAdapter, build_gemini_argv
-from backend.test_gemini_cli_adapter import RETIRED_PREFIXES
+
+# Model generations Google no longer serves; a key test on one rejects a good key.
+RETIRED_PREFIXES = ("gemini-1.0", "gemini-1.5", "gemini-pro-vision")
 
 
 class _RecordingApi:
