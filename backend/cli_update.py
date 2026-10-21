@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,7 @@ from typing import Any
 
 _BIN = "gemini"
 _NPM_PKG = "@google/gemini-cli"
+_DEFAULT_PANEL_PORT = 4200
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")
 _REQUIRED_RE = re.compile(
     r"does not support this model;\s*version\s+(\d+(?:\.\d+)+)\s+or newer",
@@ -28,6 +30,7 @@ _MISSING_MARKERS = (
 _update_lock = threading.Lock()
 _busy = False
 _last: dict[str, Any] = {}
+_log = logging.getLogger(__name__)
 
 
 def plugin_package_version() -> str:
@@ -183,6 +186,11 @@ def _npm_install() -> dict[str, Any]:
 
 def update_cli(override: str = "") -> dict[str, Any]:
     global _busy, _last
+    skip = install_skip_reason()
+    if skip:
+        # Every way in (plugin load, a launch with no Gemini CLI) ends here, so
+        # a second instance never runs `npm install -g` into the person's npm.
+        return {"ok": False, "error": f"this Ducky instance does not install or update Gemini CLI ({skip})"}
     with _update_lock:
         _busy = True
         try:
@@ -217,6 +225,39 @@ def update_cli(override: str = "") -> dict[str, Any]:
             _busy = False
 
 
+def sandbox_skip_reason() -> str:
+    """Why this Ducky must not install or update Gemini CLI on its own ("" = it may).
+
+    A sandboxed test build (own LOCALAPPDATA/USERPROFILE, panel port 4300) has
+    no update stamp, so every plugin load ran `npm install -g @google/gemini-cli`
+    into the person's real global npm. Core decides what counts as sandboxed;
+    an older core without the check falls back to the panel port, which every
+    sandboxed build moves off 4200.
+    """
+    try:
+        from frontend.ide_apply import auto_apply_skip_reason
+    except Exception:
+        return _panel_port_reason()
+    try:
+        return str(auto_apply_skip_reason() or "")
+    except Exception:
+        return _panel_port_reason()
+
+
+def _panel_port_reason() -> str:
+    port = (os.environ.get("UEFN_DUCKY_PANEL_PORT") or "").strip()
+    if port and port != str(_DEFAULT_PANEL_PORT):
+        return f"panel port {port} is not the default {_DEFAULT_PANEL_PORT}"
+    return ""
+
+
+def install_skip_reason() -> str:
+    """Why this Ducky must not run `npm install -g @google/gemini-cli` ("" = it may)."""
+    if os.environ.get("DUCKY_SKIP_CLI_UPDATE"):
+        return "DUCKY_SKIP_CLI_UPDATE is set"
+    return sandbox_skip_reason()
+
+
 def needs_plugin_load_update() -> bool:
     if not resolve_bin():
         return True
@@ -227,7 +268,11 @@ def needs_plugin_load_update() -> bool:
 
 
 def schedule_cli_update_on_plugin_load() -> None:
-    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("DUCKY_SKIP_CLI_UPDATE"):
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    reason = install_skip_reason()
+    if reason:
+        _log.info("Gemini CLI auto-update skipped: %s", reason)
         return
     try:
         if not needs_plugin_load_update():
