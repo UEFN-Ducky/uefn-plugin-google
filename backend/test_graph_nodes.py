@@ -31,3 +31,40 @@ def test_image_writes_png(tmp_path, monkeypatch):
     assert out["ok"] is True
     assert Path(out["path"]).is_file()
     assert "brainrot" not in Path(graph_nodes.__file__).read_text(encoding="utf-8")
+
+
+def test_registers_imagen_media_generator(tmp_path, monkeypatch):
+    import pytest
+
+    from backend import graph_nodes, register
+    from backend.test_registration import _RecordingApi
+
+    class _Api(_RecordingApi):
+        def register_media_generator(self, kind, fn, describe=None):
+            self.media = {kind: (fn, describe)}
+
+    api = _Api()
+    register(api)
+    gen, desc = api.media["image"]
+    assert desc == {"label": "Google Imagen", "secret_key": "gemini"}
+
+    seen = {}
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
+    monkeypatch.setattr(
+        graph_nodes,
+        "_imagen_http",
+        lambda model, prompt, key: seen.update(model=model) or {"predictions": [{"bytesBase64Encoded": "iVBORw=="}]},
+    )
+    monkeypatch.setattr(graph_nodes, "_persist", lambda raw, **kw: {"path": str(tmp_path / "x.png")})
+    assert gen("a duck") == {"path": str(tmp_path / "x.png"), "mime": "image/png"}
+    assert seen["model"] == "imagen-4.0-generate-001"
+    gen("a duck", model="imagen-3.0-generate-002")
+    assert seen["model"] == "imagen-3.0-generate-002"
+
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "")
+    with pytest.raises(RuntimeError, match="key required"):
+        gen("a duck")
+
+    old = _RecordingApi()  # an older host has no register_media_generator
+    register(old)
+    assert not hasattr(old, "media")

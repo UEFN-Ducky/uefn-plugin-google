@@ -69,4 +69,9 @@ def register(api) -> None:
     from . import graph_nodes
 
     graph_nodes.register_nodes(api)
+    # hasattr: hosts older than register_media_generator just skip it
+    if hasattr(api, "register_media_generator"):
+        api.register_media_generator(
+            "image", graph_nodes.generate_image, {"label": "Google Imagen", "secret_key": "gemini"}
+        )
     api.log("Google gateway contribution active (Providers + Gemini CLI + Antigravity IDE)")

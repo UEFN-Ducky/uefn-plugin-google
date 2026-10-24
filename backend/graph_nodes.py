@@ -83,6 +83,15 @@ def handle_image(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_image(prompt: str, **options: Any) -> dict[str, Any]:
+    """Host media generator (kind 'image'): Imagen picture → ``{path, mime}``."""
+    cfg = {"prompt": prompt, "model": options.get("model") or ""}
+    out = handle_image({"config": cfg, "payload": {}})
+    if not out.get("ok"):
+        raise RuntimeError(out.get("error") or "Imagen failed")
+    return {"path": out["path"], "mime": "image/png"}
+
+
 def register_nodes(api: Any) -> None:
     if not hasattr(api, "register_pipeline_node"):
         return
