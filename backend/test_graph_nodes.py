@@ -33,6 +33,42 @@ def test_image_writes_png(tmp_path, monkeypatch):
     assert "brainrot" not in Path(graph_nodes.__file__).read_text(encoding="utf-8")
 
 
+def test_image_node_takes_a_reference_picture(tmp_path, monkeypatch):
+    import base64
+
+    from backend import graph_nodes
+
+    data = json.loads((Path(__file__).resolve().parent.parent / "plugin.json").read_text(encoding="utf-8"))
+    node = next(n for n in data["contributes"]["automations"]["nodes"] if n["id"] == "google.image")
+    assert node["accepts_image"] is True  # core lists it on Edit Image
+    assert any(f["id"] == "image" for f in node["config_fields"])
+
+    png = b"\x89PNG\r\n\x1a\n"
+    b64 = base64.b64encode(png).decode()
+    calls = []
+    monkeypatch.setattr(graph_nodes, "_imagen_http", lambda model, prompt, key: calls.append(("imagen", model, prompt))
+                        or {"predictions": [{"bytesBase64Encoded": b64}]})
+    monkeypatch.setattr(graph_nodes, "_gemini_http", lambda model, body, key: calls.append(("gemini", model, body))
+                        or {"candidates": [{"content": {"parts": [{"text": "ok"}, {"inlineData": {"data": b64}}]}}]})
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a, **_k: "g-test")
+    monkeypatch.setattr(graph_nodes, "_persist", lambda raw, **kw: {"path": str(tmp_path / "out.png")})
+    front = tmp_path / "front.png"
+    front.write_bytes(png)
+
+    assert graph_nodes.handle_image({"config": {"prompt": "side view", "image": str(front)}})["ok"] is True
+    kind, model, body = calls[-1]
+    assert (kind, model) == ("gemini", "gemini-2.5-flash-image")  # Imagen takes no picture
+    assert body["contents"][0]["parts"] == [{"text": "side view"}, {"inline_data": {"mime_type": "image/png", "data": b64}}]
+    graph_nodes.handle_image({"config": {"prompt": "side view"}, "payload": {"image": {"path": str(front)}}})
+    assert calls[-1][0] == "gemini"
+    # No picture: the Imagen request is unchanged.
+    assert graph_nodes.handle_image({"config": {"prompt": "a duck"}})["ok"] is True
+    assert calls[-1] == ("imagen", "imagen-4.0-generate-001", "a duck")
+    missing = graph_nodes.handle_image({"config": {"prompt": "x", "image": str(tmp_path / "nope.png")}})
+    assert missing["ok"] is False and "not found" in missing["error"]
+    assert len(calls) == 3
+
+
 def test_registers_imagen_media_generator(tmp_path, monkeypatch):
     import pytest
 

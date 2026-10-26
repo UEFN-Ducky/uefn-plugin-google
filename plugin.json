@@ -123,12 +123,19 @@
           "id": "google.image",
           "label": "Google image",
           "group": "Google",
-          "description": "Generate an image with Imagen.",
+          "description": "Generate an image with Imagen, or with Gemini image from a reference picture when one is set.",
+          "accepts_image": true,
           "config_fields": [
             {
               "id": "prompt",
               "label": "Prompt",
               "type": "textarea"
+            },
+            {
+              "id": "image",
+              "label": "Reference picture (optional)",
+              "type": "file",
+              "accept": "image/*"
             },
             {
               "id": "model",
@@ -142,6 +149,10 @@
                 {
                   "id": "imagen-3.0-generate-002",
                   "label": "imagen-3.0-generate-002"
+                },
+                {
+                  "id": "gemini-2.5-flash-image",
+                  "label": "gemini-2.5-flash-image (Nano Banana)"
                 }
               ]
             }
