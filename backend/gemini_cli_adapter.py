@@ -7,6 +7,7 @@ Install: ``npm install -g @google/gemini-cli``. Auth via ``GEMINI_API_KEY``
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import threading
 from pathlib import Path
@@ -53,6 +54,106 @@ def _gemini_missing_status() -> str:
         "If this stays, send another message or Settings → Store → Update Google. "
         f"Manual fallback: {_GEMINI_INSTALL}"
     )
+
+
+# ── accounts ────────────────────────────────────────────────────────────
+# A login account is its own Gemini CLI home: the CLI reads ``$GEMINI_CLI_HOME/.gemini``
+# instead of ``~/.gemini``. Key accounts belong to the ``gemini`` provider (core's list).
+
+HOME_ENV = "GEMINI_CLI_HOME"
+SHARED_DIRS = ("extensions", "commands", "tmp", "history")
+SHARED_FILES = ("settings.json", "GEMINI.md")
+_CREDS = ("oauth_creds.json", "google_accounts.json")
+
+
+def _dot_gemini(config_dir: str | Path) -> Path:
+    return Path(config_dir) / ".gemini"
+
+
+def account_env(config_dir: str) -> dict[str, str]:
+    """Environment that runs ``gemini`` as the login kept in ``config_dir``."""
+    folder = _dot_gemini(config_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        from backend.agent.accounts import share_config
+
+        share_config(Path.home() / ".gemini", folder, SHARED_DIRS, SHARED_FILES)
+    except Exception:
+        pass  # ponytail: older core without accounts.py; the login still works unshared.
+    return {HOME_ENV: str(config_dir)}
+
+
+def account_login(config_dir: str) -> dict[str, Any]:
+    """Gemini CLI has no ``auth login``: its first interactive run asks for the Google login."""
+    from .cli_update import resolve_bin
+
+    return {"argv": [resolve_bin("") or "gemini"], "env": account_env(config_dir)}
+
+
+def account_status(config_dir: str) -> dict[str, Any]:
+    folder = _dot_gemini(config_dir)
+    status: dict[str, Any] = {"loggedIn": (folder / "oauth_creds.json").is_file()}
+    try:
+        email = json.loads((folder / "google_accounts.json").read_text(encoding="utf-8")).get("active")
+        if status["loggedIn"] and isinstance(email, str) and email:
+            status["email"] = email
+    except Exception:
+        pass
+    return status
+
+
+def account_logout(config_dir: str) -> None:
+    for name in _CREDS:
+        try:
+            (_dot_gemini(config_dir) / name).unlink()
+        except OSError:
+            pass
+
+
+# "Quota exceeded for quota metric …", "429 Too Many Requests", "RESOURCE_EXHAUSTED",
+# "You have exhausted your capacity on this model", "Rate limit exceeded".
+_LIMIT_RE = re.compile(
+    r"quota exceeded|resource[_ ]exhausted|\b429\b|too many requests|rate limit"
+    r"|exhausted your (?:daily )?(?:quota|capacity)",
+    re.I,
+)
+
+
+def is_limit_error(text: str) -> bool:
+    return isinstance(text, str) and bool(_LIMIT_RE.search(text))
+
+
+def pick_gemini_key(env: dict[str, str]) -> tuple[str, str]:
+    """(key account id, key) for this turn; ``("", "")`` when a login account or a key is already set."""
+    if env.get("GEMINI_API_KEY") or env.get(HOME_ENV):
+        return "", ""
+    try:
+        from backend.agent import accounts
+
+        acc = accounts.pick_account("gemini")
+        key = (accounts.account_key("gemini", acc) or "").strip()
+        if key:
+            return acc, key
+    except Exception:
+        pass
+    try:
+        from backend.agent.secrets import get_key
+
+        return "default", (get_key("gemini") or "").strip()
+    except Exception:
+        return "", ""
+
+
+def note_key_limit(account_id: str, *texts: Any) -> None:
+    """A turn on this key hit its quota: the next turn moves to the next key."""
+    if not account_id or not any(is_limit_error(t) for t in texts if t):
+        return
+    try:
+        from backend.agent.accounts import mark_exhausted
+
+        mark_exhausted("gemini", account_id)
+    except Exception:
+        pass
 
 
 def gemini_include_dirs(cwd: str) -> list[str]:
@@ -315,15 +416,10 @@ class GeminiCliAdapter:
         if system_prompt.strip():
             full_prompt = system_prompt.strip() + "\n\n" + prompt
 
-        # Prefer the Google gateway API key when present.
-        try:
-            from backend.agent.secrets import get_key
-
-            key = (get_key("gemini") or "").strip()
-            if key:
-                env = {**env, "GEMINI_API_KEY": key}
-        except Exception:
-            pass
+        # Prefer the Google gateway API key (the picked key account) unless a login account runs.
+        key_account, key = pick_gemini_key(env)
+        if key:
+            env = {**env, "GEMINI_API_KEY": key}
 
         argv = build_gemini_argv(
             binary=binary,
@@ -358,6 +454,8 @@ class GeminiCliAdapter:
             timeout_s=timeout_s,
             error_text=state.error_text,
         )
+        if not result.ok:
+            note_key_limit(key_account, result.error, state.error_text, proc.stderr_tail)
         if result.ok or not should_heal_launch(
             result.error or "",
             result.reply_text or "",

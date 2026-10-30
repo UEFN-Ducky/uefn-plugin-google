@@ -50,6 +50,14 @@ def test_auto_approve_is_exposed_as_a_setting() -> None:
     assert defaults["auto_approve"] is True
 
 
+def test_account_hooks_are_registered() -> None:
+    api = _registered()
+    agent = api.coding_agents["gemini_cli"]
+    for hook in ("account_env", "account_login", "account_status", "account_logout", "is_limit_error"):
+        assert callable(agent[hook]), hook
+    assert api.providers["gemini"]["is_quota_error"]("429 Too Many Requests")
+
+
 def test_mcp_injection_is_only_advertised_when_the_config_reaches_the_cli() -> None:
     """launch() drops mcp_config_path, so claiming mcp_inject hides missing tools."""
     argv = build_gemini_argv(binary="gemini", prompt="x", model="m", extra_args="")

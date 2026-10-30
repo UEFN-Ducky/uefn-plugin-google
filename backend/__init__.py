@@ -29,6 +29,7 @@ def _skills_dir() -> str:
 
 
 def register(api) -> None:
+    from . import gemini_cli_adapter as gca
     from .gemini_cli_adapter import GeminiCliAdapter
     from .gemini_provider import GeminiProvider
 
@@ -44,6 +45,7 @@ def register(api) -> None:
         clear_model_cache=clear_model_cache,
         cache_mode="implicit",
         shows_thinking_effort=True,
+        is_quota_error=gca.is_limit_error,
     )
     api.register_coding_agent(
         "gemini_cli",
@@ -58,6 +60,11 @@ def register(api) -> None:
         },
         install_help=_INSTALL_HELP,
         token_provider="gemini",
+        account_env=gca.account_env,
+        account_login=gca.account_login,
+        account_status=gca.account_status,
+        account_logout=gca.account_logout,
+        is_limit_error=gca.is_limit_error,
     )
     api.register_ide_hookup("antigravity", label="Antigravity")
     try:
