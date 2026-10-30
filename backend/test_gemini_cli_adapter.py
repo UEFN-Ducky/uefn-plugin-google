@@ -49,3 +49,49 @@ def test_only_duckys_mcp_server_may_load() -> None:
     at = argv.index("--allowed-mcp-server-names")
     assert argv[at + 1] == "uefn"
     assert argv[at + 2].startswith("--")
+
+
+def test_login_account_runs_in_its_own_gemini_home(tmp_path) -> None:
+    from backend.gemini_cli_adapter import account_env, account_logout, account_status
+
+    home = tmp_path / "acc2"
+    assert account_env(str(home)) == {"GEMINI_CLI_HOME": str(home)}
+    assert account_status(str(home)) == {"loggedIn": False}
+    (home / ".gemini" / "oauth_creds.json").write_text("{}", encoding="utf-8")
+    (home / ".gemini" / "google_accounts.json").write_text('{"active": "a@b.c"}', encoding="utf-8")
+    assert account_status(str(home)) == {"loggedIn": True, "email": "a@b.c"}
+    account_logout(str(home))
+    assert account_status(str(home))["loggedIn"] is False
+
+
+def test_quota_text_is_a_limit_error() -> None:
+    from backend.gemini_cli_adapter import is_limit_error
+
+    assert is_limit_error("[API Error: 429 Too Many Requests]")
+    assert is_limit_error("Quota exceeded for quota metric 'Generate Content API requests'")
+    assert is_limit_error("RESOURCE_EXHAUSTED")
+    assert not is_limit_error("Context window full")
+
+
+def test_second_key_is_used_after_the_first_hits_429(monkeypatch) -> None:
+    """Gemini key 'Free tier 2' runs the next turn once key 1 is at its quota."""
+    import types
+
+    from backend import gemini_cli_adapter as gca
+
+    exhausted: set[str] = set()
+    fake = types.SimpleNamespace(
+        pick_account=lambda p: "k2" if "default" in exhausted else "default",
+        account_key=lambda p, a: {"default": "KEY1", "k2": "KEY2"}[a],
+        mark_exhausted=lambda p, a, until=None: exhausted.add(a),
+    )
+    import backend.agent as agent_pkg
+
+    monkeypatch.setattr(agent_pkg, "accounts", fake, raising=False)
+    monkeypatch.setitem(__import__("sys").modules, "backend.agent.accounts", fake)
+
+    assert gca.pick_gemini_key({}) == ("default", "KEY1")
+    gca.note_key_limit("default", "429 Too Many Requests")
+    assert gca.pick_gemini_key({}) == ("k2", "KEY2")
+    # A login account (own home) or a key core already set is left alone.
+    assert gca.pick_gemini_key({"GEMINI_CLI_HOME": "x"}) == ("", "")
