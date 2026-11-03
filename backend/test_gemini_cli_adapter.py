@@ -95,3 +95,23 @@ def test_second_key_is_used_after_the_first_hits_429(monkeypatch) -> None:
     assert gca.pick_gemini_key({}) == ("k2", "KEY2")
     # A login account (own home) or a key core already set is left alone.
     assert gca.pick_gemini_key({"GEMINI_CLI_HOME": "x"}) == ("", "")
+
+
+def test_installed_cli_without_a_login_or_key_is_not_connected(tmp_path, monkeypatch) -> None:
+    """A fresh PC with gemini on PATH showed 'Connected' in setup: detect left logged_in unset."""
+    from backend import gemini_cli_adapter as gca
+
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
+    monkeypatch.setattr(gca, "which_cli", lambda *_a: "gemini.cmd")
+    monkeypatch.setattr(gca, "pick_gemini_key", lambda _env: ("", ""))
+    monkeypatch.setattr(gca, "_gemini_cli_model_rows", lambda: [])
+    monkeypatch.setattr("backend.cli_update.read_cli_version", lambda _p: "", raising=False)
+    monkeypatch.setattr("backend.cli_update.status_text", lambda: "", raising=False)
+
+    assert gca.GeminiCliAdapter().detect(settings=None).logged_in is False
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "oauth_creds.json").write_text("{}", encoding="utf-8")
+    assert gca.GeminiCliAdapter().detect(settings=None).logged_in is True

@@ -7,6 +7,7 @@ Install: ``npm install -g @google/gemini-cli``. Auth via ``GEMINI_API_KEY``
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import threading
@@ -100,6 +101,15 @@ def account_status(config_dir: str) -> dict[str, Any]:
     except Exception:
         pass
     return status
+
+
+def is_gemini_logged_in() -> bool:
+    """A Google login in the CLI's home, or an API key it can run on (env or the saved Google key)."""
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return True
+    if account_status(os.environ.get(HOME_ENV) or str(Path.home())).get("loggedIn"):
+        return True
+    return bool(pick_gemini_key({})[1])
 
 
 def account_logout(config_dir: str) -> None:
@@ -339,21 +349,24 @@ class GeminiCliAdapter:
         override = str(cfg.get("cli_path") or "")
         path = which_cli("gemini", override)
         default_args = str(cfg.get("default_args") or "")
+        logged_in: bool | None = None
         if path:
             from .cli_update import read_cli_version, status_text
 
+            logged_in = is_gemini_logged_in()
             ver = read_cli_version(path)
             extra = status_text()
             status = f"Found: {path}"
             if ver:
                 status += f" · v{ver}"
+            status += " · logged in" if logged_in else " · not logged in"
             if extra and extra not in status:
                 status += f" · {extra}"
             available = enabled
         else:
             status = _gemini_missing_status()
             available = False
-        return CodingAgentInfo(
+        info = CodingAgentInfo(
             id=self.id,
             label=self.label,
             enabled=enabled,
@@ -364,6 +377,9 @@ class GeminiCliAdapter:
             capabilities=self.capabilities,
             models=_gemini_cli_model_rows(),
         )
+        # Unset reads as "no account to sign in to" and showed Gemini Connected with no login.
+        info.logged_in = logged_in  # type: ignore[attr-defined]
+        return info
 
     def launch(
         self,
