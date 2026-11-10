@@ -75,3 +75,65 @@ def test_missing_cli_says_so_and_installs(monkeypatch, tmp_path):
     monkeypatch.setattr(gemini_auth, "_install_in_background", lambda: started.append(1))
     assert gemini_auth.start_browser_login(str(tmp_path), popen=None) == {"error": gemini_auth.NOT_INSTALLED}
     assert started == [1]
+
+
+ENOENT = (
+    "Failed to parse default sandbox policy: Error: ENOENT: no such file or directory, open "
+    "'C:\\npm\\node_modules\\@google\\gemini-cli\\bundle\\policies\\sandbox-default.toml'\n"
+    "    at loadCliConfig\n"
+)
+
+
+class BrokenCli:
+    """A half-installed CLI: dies at start with the ENOENT, before any sign-in."""
+
+    def __init__(self) -> None:
+        self.stdout = iter([ENOENT])
+
+    def poll(self):
+        return 1
+
+    def kill(self):
+        pass
+
+
+def _launches(*procs):
+    queue = list(procs)
+    return lambda argv, **kw: queue.pop(0)(argv, **kw) if callable(queue[0]) else queue.pop(0)
+
+
+def test_broken_install_is_repaired_once_then_signs_in(cli, tmp_path, monkeypatch):
+    updates = []
+    monkeypatch.setattr(cli_update, "update_cli", lambda o="": updates.append(o) or {"ok": True})
+    fake = FakeCli(tmp_path, writes=True)
+    gemini_auth.start_browser_login(str(tmp_path), popen=_launches(BrokenCli(), fake), poll_s=0.01)
+    assert _settle(tmp_path) == {"loggedIn": True, "email": "you@gmail.com"}
+    assert updates == [""] and fake.argv[0] == "gemini.cmd"  # one reinstall, then the retry
+
+
+def test_still_broken_after_reinstall_says_so_without_a_loop(cli, tmp_path, monkeypatch):
+    updates = []
+    monkeypatch.setattr(cli_update, "update_cli", lambda o="": updates.append(o) or {"ok": True})
+    gemini_auth.start_browser_login(str(tmp_path), popen=_launches(BrokenCli(), BrokenCli()), poll_s=0.01)
+    st = _settle(tmp_path)
+    assert st["loggedIn"] is False and st["error"].startswith(cli_update.BROKEN_INSTALL + ": Failed to parse")
+    assert updates == [""]
+
+
+def test_reinstall_failure_shows_the_npm_error(cli, tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_update, "update_cli", lambda o="": {"ok": False, "error": "npm WARN x\nnpm ERR! code EACCES"})
+    gemini_auth.start_browser_login(str(tmp_path), popen=_launches(BrokenCli()), poll_s=0.01)
+    assert _settle(tmp_path)["error"] == f"{cli_update.BROKEN_INSTALL}: npm ERR! code EACCES"
+
+
+def test_repairing_shows_while_npm_runs(cli, tmp_path, monkeypatch):
+    import threading
+
+    gate = threading.Event()
+    monkeypatch.setattr(cli_update, "update_cli", lambda o="": gate.wait(3) and {"ok": False, "error": "x"})
+    gemini_auth.start_browser_login(str(tmp_path), popen=_launches(BrokenCli()), poll_s=0.01)
+    end = time.monotonic() + 3
+    while not account_status(str(tmp_path)).get("repairing") and time.monotonic() < end:
+        time.sleep(0.01)
+    assert account_status(str(tmp_path)) == {"loggedIn": False, "pending": True, "repairing": True}
+    gate.set()

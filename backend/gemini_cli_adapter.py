@@ -524,7 +524,7 @@ class GeminiCliAdapter:
             cancel=cancel,
         )
         streamed_all = "".join(state.text_parts).strip()
-        return finalize_cli_turn(
+        retried = finalize_cli_turn(
             proc=proc,
             reply=streamed_all,
             streamed=bool(streamed_all) or bool(state.blocks),
@@ -536,3 +536,9 @@ class GeminiCliAdapter:
             timeout_s=timeout_s,
             error_text=state.error_text,
         )
+        from .cli_update import BROKEN_INSTALL, error_line, is_broken_install_error
+
+        tails = (retried.error or "", proc.stderr_tail, proc.raw_tail, state.error_text)
+        if not retried.ok and is_broken_install_error(*tails):  # once only: never a reinstall loop
+            retried.error = f"{BROKEN_INSTALL}: {error_line(chr(10).join(t or '' for t in tails))}"
+        return retried

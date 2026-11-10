@@ -29,6 +29,14 @@ def test_parse_and_heal():
     assert is_cli_missing_error("gemini: no such file or directory")
     assert should_heal_launch("cannot find the path")
     assert not should_heal_launch("quota exceeded")
+    broken = (
+        "Failed to parse default sandbox policy: Error: ENOENT: no such file or directory, open "
+        "'C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@google\\gemini-cli\\bundle\\policies\\sandbox-default.toml'"
+    )
+    assert cli_update.is_broken_install_error(broken) and should_heal_launch(broken)
+    assert cli_update.is_broken_install_error("Error: ENOENT, open '/usr/lib/node_modules/@google/gemini-cli/bundle/x.js'")
+    assert not cli_update.is_broken_install_error("ENOENT: no such file 'C:/proj/notes.md'")
+    assert cli_update.error_line("npm WARN deprecated\nnpm ERR! code EACCES\n") == "npm ERR! code EACCES"
 
 
 def test_npm_argv_skips_cmd(tmp_path, monkeypatch):

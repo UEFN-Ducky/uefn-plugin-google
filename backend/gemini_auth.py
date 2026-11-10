@@ -36,7 +36,7 @@ def login_state(dot: Path) -> dict[str, Any]:
     if not st:
         return {}
     if st["pending"]:
-        return {"pending": True}
+        return {"pending": True, "repairing": True} if st["repairing"] else {"pending": True}
     return {"error": st["error"]} if st["error"] else {}
 
 
@@ -81,36 +81,81 @@ def start_browser_login(
         old = _STATE.pop(key, None)
     if old:
         _stop(old["proc"])
-    try:
+    def launch() -> Any:
+        """The hidden run; its output (no tokens: the CLI prints none) is kept for errors."""
         proc = popen(
-            [binary, "-p", "Reply with OK."],
+            [resolve_bin("") or binary, "-p", "Reply with OK."],
             env=env,
             cwd=str(dot),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             **hidden_run_kwargs(),
         )
+        out: list[str] = []
+        proc.ducky_output = out
+        if getattr(proc, "stdout", None) is not None:
+            proc.ducky_reader = threading.Thread(target=lambda: out.extend(proc.stdout), name="gemini-login-out", daemon=True)
+            proc.ducky_reader.start()
+        return proc
+
+    try:
+        proc = launch()
     except OSError as exc:
         return {"error": f"Could not start Gemini CLI: {exc}"}
-    state = {"proc": proc, "pending": True, "error": ""}
+    state = {"proc": proc, "pending": True, "repairing": False, "error": ""}
     with _LOCK:
         _STATE[key] = state
     threading.Thread(
-        target=_watch, args=(state, dot / "oauth_creds.json", timeout_s, poll_s), name="gemini-login", daemon=True
+        target=_watch, args=(state, dot / "oauth_creds.json", timeout_s, poll_s, launch), name="gemini-login", daemon=True
     ).start()
     return {"message": WAITING}
 
 
-def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float) -> None:
+def _output(proc: Any) -> str:
+    reader = getattr(proc, "ducky_reader", None)
+    if reader is not None:
+        reader.join(2.0)  # the process ended: its last lines are on their way
+    return "".join(getattr(proc, "ducky_output", []))
+
+
+def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float, launch: Callable[[], Any]) -> None:
+    from .cli_update import BROKEN_INSTALL, error_line, is_broken_install_error, update_cli
+
     deadline = time.monotonic() + timeout_s
-    proc = state["proc"]
-    while time.monotonic() < deadline and not creds.is_file():
-        if proc.poll() is not None:
-            break  # the CLI gave up (cancelled in the browser, or an error)
-        time.sleep(poll_s)
+    repaired = False
+    error = NOT_FINISHED
+    while True:
+        proc = state["proc"]
+        while time.monotonic() < deadline and not creds.is_file() and proc.poll() is None:
+            time.sleep(poll_s)
+        if creds.is_file() or proc.poll() is None:
+            break  # signed in, or timed out
+        text = _output(proc)  # the CLI gave up: cancelled in the browser, or it can't start
+        if not is_broken_install_error(text):
+            break
+        if repaired:  # still broken after one reinstall: say so, never loop
+            error = f"{BROKEN_INSTALL}: {error_line(text)}"
+            break
+        repaired = True
+        with _LOCK:
+            state["repairing"] = True
+        upd = update_cli("")
+        with _LOCK:
+            state["repairing"] = False
+        if not upd.get("ok"):
+            error = f"{BROKEN_INSTALL}: {error_line(str(upd.get('error') or ''))}"
+            break
+        try:
+            state["proc"] = launch()
+        except OSError as exc:
+            error = f"Could not start Gemini CLI: {exc}"
+            break
     ok = creds.is_file()
-    _stop(proc)  # signed in: the prompt it would answer is not needed
+    _stop(state["proc"])  # signed in: the prompt it would answer is not needed
     with _LOCK:
         state["pending"] = False
-        state["error"] = "" if ok else NOT_FINISHED
+        state["error"] = "" if ok else error

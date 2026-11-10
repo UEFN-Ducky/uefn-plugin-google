@@ -27,6 +27,14 @@ _MISSING_MARKERS = (
     "cannot find the path",
     "not found in path",
 )
+# A half-written npm install: the CLI dies loading its own bundled files, before any auth.
+# e.g. "Failed to parse default sandbox policy: Error: ENOENT ... bundle\policies\sandbox-default.toml"
+_BROKEN_RE = re.compile(
+    r"failed to parse default sandbox policy|gemini-cli[\\/]+bundle[\\/]+\S*\b.*enoent"
+    r"|enoent[^\n]*gemini-cli[\\/]+bundle[\\/]",
+    re.I,
+)
+BROKEN_INSTALL = "Gemini CLI is broken on this PC: reinstall failed"
 _update_lock = threading.Lock()
 _busy = False
 _last: dict[str, Any] = {}
@@ -64,8 +72,22 @@ def is_cli_missing_error(*chunks: str) -> bool:
     return any(m in low for m in _MISSING_MARKERS)
 
 
+def is_broken_install_error(*chunks: str) -> bool:
+    """The installed CLI is missing its own bundled files (an interrupted npm update)."""
+    return bool(_BROKEN_RE.search("\n".join(c or "" for c in chunks)))
+
+
+def error_line(text: str) -> str:
+    """The line worth showing from npm or CLI output (the first that names an error)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for ln in lines:
+        if re.search(r"\berr(or)?\b|enoent|failed", ln, re.I):
+            return ln[:300]
+    return lines[0][:300] if lines else ""
+
+
 def should_heal_launch(*chunks: str) -> bool:
-    return is_cli_too_old_error(*chunks) or is_cli_missing_error(*chunks)
+    return is_cli_too_old_error(*chunks) or is_cli_missing_error(*chunks) or is_broken_install_error(*chunks)
 
 
 def resolve_bin(override: str = "") -> str:
