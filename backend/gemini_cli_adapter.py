@@ -216,6 +216,21 @@ def gemini_include_dirs(cwd: str) -> list[str]:
     return out
 
 
+def run_env(env: dict[str, str], key: str, *, auto_approve: bool) -> dict[str, str]:
+    """A chat run's environment. With a key: the key. Without one: the Google login
+    (``GOOGLE_GENAI_USE_GCA``), else headless runs exit 41 "Please set an Auth method".
+    Auto-approve also trusts the folder, else the CLI drops ``-y`` ("current folder is
+    not trusted") and every tool call is refused headless."""
+    out = dict(env)
+    if key:
+        out["GEMINI_API_KEY"] = key
+    elif not out.get("GEMINI_API_KEY") and not out.get("GOOGLE_API_KEY"):
+        out["GOOGLE_GENAI_USE_GCA"] = "true"
+    if auto_approve:
+        out["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+    return out
+
+
 #: The longest message kept on the command line; Windows' limit is 32,767 for the whole line.
 ARG_PROMPT_MAX = 4000
 LONG_PROMPT_ARG = "Do what the message above asks."
@@ -478,8 +493,7 @@ class GeminiCliAdapter:
 
         # Prefer the Google gateway API key (the picked key account) unless a login account runs.
         key_account, key = pick_gemini_key(env)
-        if key:
-            env = {**env, "GEMINI_API_KEY": key}
+        env = run_env(env, key, auto_approve=self._auto_approve())
 
         argv = build_gemini_argv(
             binary=binary,

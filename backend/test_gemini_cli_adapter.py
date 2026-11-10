@@ -137,6 +137,18 @@ def test_system_prompt_rides_stdin_and_the_message_stays_the_question() -> None:
     assert split_gemini_prompt("rules", long_msg) == (LONG_PROMPT_ARG, "rules\n\n" + long_msg)
 
 
+def test_run_env_signs_in_with_google_and_trusts_the_folder() -> None:
+    """Exit 41 'Please set an Auth method' and 'Approval mode overridden ... not trusted'."""
+    from backend.gemini_cli_adapter import run_env
+
+    login = run_env({"GEMINI_CLI_HOME": "C:/acc"}, "", auto_approve=True)
+    assert login["GOOGLE_GENAI_USE_GCA"] == "true" and login["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+    assert "GEMINI_API_KEY" not in login and login["GEMINI_CLI_HOME"] == "C:/acc"
+    keyed = run_env({}, "AIza-k", auto_approve=False)
+    assert keyed["GEMINI_API_KEY"] == "AIza-k" and "GOOGLE_GENAI_USE_GCA" not in keyed
+    assert "GEMINI_CLI_TRUST_WORKSPACE" not in keyed  # asks before changes: the CLI's own trust
+
+
 def test_a_huge_system_prompt_never_reaches_the_command_line(tmp_path, monkeypatch) -> None:
     """[Errno 206] Prompt/command too long for Windows: the 100K system prompt went in argv."""
     from backend import gemini_cli_adapter as gca
