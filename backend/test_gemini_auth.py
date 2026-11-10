@@ -62,6 +62,35 @@ def test_sign_in_that_never_finishes_times_out(cli, tmp_path):
     assert fake.killed
 
 
+def test_headless_consent_prompt_is_answered(cli, tmp_path):
+    import io
+
+    fake = FakeCli(tmp_path, writes=True)
+    fake.stdin = io.StringIO()  # the CLI asks "Do you want to continue? [Y/n]" here
+    gemini_auth.start_browser_login(str(tmp_path), popen=fake, poll_s=0.01)
+    assert fake.stdin.getvalue() == "y\n"
+    assert _settle(tmp_path)["loggedIn"] is True
+
+
+class QuitCli:
+    """The CLI gives up before sign-in (e.g. auth refused) and says why."""
+
+    def __init__(self) -> None:
+        self.stdout = iter(["Error: Google OAuth error: access_denied.\n"])
+
+    def poll(self):
+        return 1
+
+    def kill(self):
+        pass
+
+
+def test_cli_that_quits_shows_its_error(cli, tmp_path):
+    gemini_auth.start_browser_login(str(tmp_path), popen=lambda argv, **kw: QuitCli(), poll_s=0.01)
+    st = _settle(tmp_path)
+    assert st == {"loggedIn": False, "error": f"{gemini_auth.NOT_FINISHED} Error: Google OAuth error: access_denied."}
+
+
 def test_default_account_uses_the_cli_home(cli, tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
     fake = FakeCli(tmp_path, writes=True)

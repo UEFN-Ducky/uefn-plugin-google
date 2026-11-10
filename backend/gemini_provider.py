@@ -185,8 +185,10 @@ class GeminiProvider:
 
     def _client(self):
         from google import genai
+        from google.genai import types
 
-        return genai.Client(api_key=self._api_key)
+        # The "-latest" aliases and preview models live on v1beta only; some SDK builds default to v1.
+        return genai.Client(api_key=self._api_key, http_options=types.HttpOptions(api_version="v1beta"))
 
     def _to_gemini_contents(self, messages: list[ProviderMessage]) -> list[Any]:
         from google.genai import types

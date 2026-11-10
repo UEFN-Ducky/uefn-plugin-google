@@ -87,7 +87,7 @@ def start_browser_login(
             [resolve_bin("") or binary, "-p", "Reply with OK."],
             env=env,
             cwd=str(dot),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -95,6 +95,15 @@ def start_browser_login(
             errors="replace",
             **hidden_run_kwargs(),
         )
+        # Headless runs ask "Opening authentication page… Do you want to continue? [Y/n]"
+        # on stdin before opening the browser; an empty stdin never answers and it waits.
+        stdin = getattr(proc, "stdin", None)
+        if stdin is not None:
+            try:
+                stdin.write("y\n")
+                stdin.flush()
+            except (OSError, ValueError):
+                pass
         out: list[str] = []
         proc.ducky_output = out
         if getattr(proc, "stdout", None) is not None:
@@ -136,6 +145,8 @@ def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float, 
             break  # signed in, or timed out
         text = _output(proc)  # the CLI gave up: cancelled in the browser, or it can't start
         if not is_broken_install_error(text):
+            line = error_line(text)
+            error = f"{NOT_FINISHED} {line}" if line else NOT_FINISHED
             break
         if repaired:  # still broken after one reinstall: say so, never loop
             error = f"{BROKEN_INSTALL}: {error_line(text)}"
