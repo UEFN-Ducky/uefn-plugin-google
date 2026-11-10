@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from backend.gemini_cli_adapter import GeminiCliAdapter, build_gemini_argv
 
 
@@ -124,6 +126,40 @@ def test_default_account_hooks_take_none(tmp_path, monkeypatch) -> None:
     fresh = tmp_path / "not-made-yet"
     assert account_login(str(fresh))["env"] == {"GEMINI_CLI_HOME": str(fresh)}
     assert (fresh / ".gemini").is_dir()
+
+
+def test_system_prompt_rides_stdin_and_the_message_stays_the_question() -> None:
+    from backend.gemini_cli_adapter import ARG_PROMPT_MAX, LONG_PROMPT_ARG, split_gemini_prompt
+
+    assert split_gemini_prompt("  rules  ", "hey") == ("hey", "rules")
+    assert split_gemini_prompt("", "hey") == ("hey", "")  # stdin still closes
+    long_msg = "x" * (ARG_PROMPT_MAX + 1)
+    assert split_gemini_prompt("rules", long_msg) == (LONG_PROMPT_ARG, "rules\n\n" + long_msg)
+
+
+def test_a_huge_system_prompt_never_reaches_the_command_line(tmp_path, monkeypatch) -> None:
+    """[Errno 206] Prompt/command too long for Windows: the 100K system prompt went in argv."""
+    from backend import gemini_cli_adapter as gca
+
+    seen: dict[str, object] = {}
+
+    def fake_run(**kw):
+        seen.update(kw)
+        return SimpleNamespace(returncode=0, stderr_tail="", raw_tail="", stdout_lines=0, timed_out=False, cancelled=False)
+
+    monkeypatch.setattr(gca, "run_streaming_process", fake_run)
+    monkeypatch.setattr("backend.cli_update.resolve_bin", lambda _p="": "gemini.cmd")
+    monkeypatch.setattr(gca, "pick_gemini_key", lambda _env: ("", ""))
+    monkeypatch.setattr(gca, "finalize_cli_turn", lambda **kw: SimpleNamespace(ok=True, error=""))
+    system = "S" * 100_000
+    gca.GeminiCliAdapter().launch(
+        prompt="hey", system_prompt=system, cwd=str(tmp_path), conv_id="c1", model="auto",
+        mcp_config_path="", extra_args="", cli_path="", env={}, push=lambda _e: None,
+    )
+    argv = seen["argv"]
+    assert sum(len(a) + 3 for a in argv) < 8000  # far under Windows' 32,767
+    assert argv[argv.index("-p") + 1] == "hey"
+    assert seen["stdin_data"] == system
 
 
 def test_installed_cli_without_a_login_or_key_is_not_connected(tmp_path, monkeypatch) -> None:

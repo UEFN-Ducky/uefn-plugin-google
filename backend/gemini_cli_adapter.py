@@ -216,6 +216,20 @@ def gemini_include_dirs(cwd: str) -> list[str]:
     return out
 
 
+#: The longest message kept on the command line; Windows' limit is 32,767 for the whole line.
+ARG_PROMPT_MAX = 4000
+LONG_PROMPT_ARG = "Do what the message above asks."
+
+
+def split_gemini_prompt(system_prompt: str, prompt: str) -> tuple[str, str]:
+    """(``-p`` text, stdin text). ``gemini -p X`` with piped stdin S answers "S\\n\\nX", so the
+    system prompt rides stdin and the message stays the question; a long message goes too."""
+    system = (system_prompt or "").strip()
+    if len(prompt) <= ARG_PROMPT_MAX:
+        return prompt, system  # "" still closes stdin: the CLI never waits on an open pipe
+    return LONG_PROMPT_ARG, (system + "\n\n" + prompt) if system else prompt
+
+
 def build_gemini_argv(
     *,
     binary: str,
@@ -458,9 +472,9 @@ class GeminiCliAdapter:
                     error=str(upd.get("error") or "Gemini CLI not found and auto-install failed"),
                     status="error",
                 )
-        full_prompt = prompt
-        if system_prompt.strip():
-            full_prompt = system_prompt.strip() + "\n\n" + prompt
+        # Windows caps a command line at ~32K characters ([Errno 206]): the system prompt (and
+        # a long message) go in on stdin, which the CLI puts ahead of the -p text.
+        arg_prompt, stdin_prompt = split_gemini_prompt(system_prompt, prompt)
 
         # Prefer the Google gateway API key (the picked key account) unless a login account runs.
         key_account, key = pick_gemini_key(env)
@@ -469,7 +483,7 @@ class GeminiCliAdapter:
 
         argv = build_gemini_argv(
             binary=binary,
-            prompt=full_prompt,
+            prompt=arg_prompt,
             model=model_id,
             extra_args=extra_args,
             auto_approve=self._auto_approve(),
@@ -485,6 +499,7 @@ class GeminiCliAdapter:
             on_line=state.on_line,
             timeout_s=timeout_s,
             cancel=cancel,
+            stdin_data=stdin_prompt,
         )
         streamed_all = "".join(state.text_parts).strip()
         reply = streamed_all
@@ -537,6 +552,7 @@ class GeminiCliAdapter:
             on_line=state.on_line,
             timeout_s=timeout_s,
             cancel=cancel,
+            stdin_data=stdin_prompt,
         )
         streamed_all = "".join(state.text_parts).strip()
         retried = finalize_cli_turn(
