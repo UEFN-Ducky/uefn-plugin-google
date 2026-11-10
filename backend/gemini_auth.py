@@ -170,3 +170,16 @@ def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float, 
     with _LOCK:
         state["pending"] = False
         state["error"] = "" if ok else error
+    if ok:
+        _refresh_agents()
+
+
+def _refresh_agents() -> None:
+    """Settings' Google dot and the model picker read a 10-minute detect cache: re-probe now."""
+    try:
+        from backend.agent.coding_agents.base import invalidate_detect_cache, kick_detect_refresh
+
+        invalidate_detect_cache()
+        kick_detect_refresh()
+    except Exception:
+        pass

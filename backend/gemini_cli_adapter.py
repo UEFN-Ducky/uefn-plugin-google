@@ -27,26 +27,38 @@ from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
 _GEMINI_INSTALL = "npm install -g @google/gemini-cli"
 
 
+#: The CLI's own aliases: it resolves each to the newest model the signed-in account may use,
+#: so a Google login (no API key, no models.list) still has a picker that never goes stale.
+CLI_ALIAS_ROWS = (
+    {"id": "auto", "name": "Auto", "provider": "Gemini CLI"},
+    {"id": "pro", "name": "Pro", "provider": "Gemini CLI"},
+    {"id": "flash", "name": "Flash", "provider": "Gemini CLI"},
+    {"id": "flash-lite", "name": "Flash Lite", "provider": "Gemini CLI"},
+)
+
+
 def _gemini_cli_model_rows() -> list[dict[str, str]]:
-    """Live Gemini models.list — empty if the key is missing or the catalog call fails."""
+    """Live Gemini models.list with the saved key; the CLI's aliases without one (or when it fails)."""
+    aliases = [dict(r) for r in CLI_ALIAS_ROWS]
     try:
         from backend.agent.secrets import get_key
 
         key = (get_key("gemini") or "").strip()
     except Exception:
-        return []
+        key = ""
     if not key:
-        return []
+        return aliases
     try:
         from .model_fetch import fetch_models
 
-        return [
+        rows = [
             {"id": info.id, "name": info.display_name or info.id, "provider": "Gemini CLI"}
             for info in fetch_models(key)
             if info.id
         ]
     except Exception:
-        return []
+        rows = []
+    return aliases + rows
 
 
 def _gemini_missing_status() -> str:
@@ -133,6 +145,9 @@ def account_logout(config_dir: str | None) -> None:
             (_dot_gemini(config_dir) / name).unlink()
         except OSError:
             pass
+    from .gemini_auth import _refresh_agents
+
+    _refresh_agents()
 
 
 # "Quota exceeded for quota metric …", "429 Too Many Requests", "RESOURCE_EXHAUSTED",

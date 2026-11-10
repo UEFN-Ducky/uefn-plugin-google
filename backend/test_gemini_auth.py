@@ -54,6 +54,17 @@ def test_browser_sign_in_writes_creds_then_logged_in(cli, tmp_path):
     assert fake.killed  # the prompt run is stopped once signed in
 
 
+def test_sign_in_refreshes_the_agent_list(cli, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gemini_auth, "_refresh_agents", lambda: calls.append(1))
+    gemini_auth.start_browser_login(str(tmp_path), popen=FakeCli(tmp_path, writes=True), poll_s=0.01)
+    assert _settle(tmp_path)["loggedIn"] is True
+    end = time.monotonic() + 2
+    while not calls and time.monotonic() < end:
+        time.sleep(0.01)
+    assert calls == [1]  # the Google dot and the picker re-read now, not in 10 minutes
+
+
 def test_sign_in_that_never_finishes_times_out(cli, tmp_path):
     fake = FakeCli(tmp_path, writes=False)
     gemini_auth.start_browser_login(str(tmp_path), popen=fake, timeout_s=0.1, poll_s=0.01)

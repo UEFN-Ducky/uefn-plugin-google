@@ -14,6 +14,15 @@ def _argv(**overrides: object) -> list[str]:
     return build_gemini_argv(**kwargs)  # type: ignore[arg-type]
 
 
+def test_google_login_without_a_key_still_lists_the_cli_aliases(monkeypatch) -> None:
+    import backend.agent.secrets as secrets
+
+    monkeypatch.setattr(secrets, "get_key", lambda _p: "")
+    from backend import gemini_cli_adapter as gca
+
+    assert [r["id"] for r in gca._gemini_cli_model_rows()] == ["auto", "pro", "flash", "flash-lite"]
+
+
 def test_picker_is_empty_without_a_live_catalog(monkeypatch) -> None:
     monkeypatch.setattr("backend.gemini_cli_adapter._gemini_cli_model_rows", lambda: [])
     assert GeminiCliAdapter().detect(settings=None).models == []
