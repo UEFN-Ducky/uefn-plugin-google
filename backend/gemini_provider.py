@@ -439,13 +439,39 @@ class GeminiProvider:
             self._fc_contents.append(types.Content(role="model", parts=parts))
 
     async def test_connection(self) -> tuple[bool, str]:
+        """One tiny call. Google retires models for new keys ("no longer available to new
+        users"), so a 404 on the test model retries once on a flash model this key lists."""
         try:
             client = self._client()
-            r = client.models.generate_content(
-                model=self._model,
-                contents="ping",
-            )
-            _ = r.text
-            return True, "Gemini OK"
         except Exception as e:
             return False, str(e)
+        model = self._model
+        for _ in range(2):
+            try:
+                r = client.models.generate_content(model=model, contents="ping")
+                _ = r.text
+                return True, "Gemini OK"
+            except Exception as e:
+                if "NOT_FOUND" not in str(e) and "404" not in str(e):
+                    return False, str(e)
+                other = _usable_flash(client, skip=model)
+                if not other:
+                    return False, str(e)
+                model = other
+        return False, f"No Gemini model answered for this key (last tried {model})."
+
+
+def _usable_flash(client: Any, *, skip: str) -> str:
+    """A generateContent flash model this key can list (newest first), never ``skip``."""
+    names: list[str] = []
+    try:
+        for m in client.models.list():
+            name = str(getattr(m, "name", "") or "").replace("models/", "")
+            actions = [str(a) for a in (getattr(m, "supported_actions", None) or [])]
+            if name and name != skip and "flash" in name and (not actions or "generateContent" in actions):
+                names.append(name)
+    except Exception:
+        return ""
+    stable = [n for n in names if "preview" not in n and "exp" not in n and "image" not in n and "tts" not in n and "live" not in n]
+    pick = sorted(stable or names, reverse=True)
+    return pick[0] if pick else ""

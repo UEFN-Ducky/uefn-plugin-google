@@ -40,7 +40,7 @@ def register(api) -> None:
         factory=lambda api_key, model, **kw: GeminiProvider(api_key, model, **kw),
         fetch_models=_fetch_models,
         fetch_usage=_fetch_usage,
-        test_key_model="gemini-2.5-flash",
+        test_key_model="gemini-flash-latest",  # v1beta alias; a retired model falls back (test_connection)
         tool_schema="gemini",
         clear_model_cache=clear_model_cache,
         cache_mode="implicit",
