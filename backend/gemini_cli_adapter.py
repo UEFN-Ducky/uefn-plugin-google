@@ -67,12 +67,16 @@ SHARED_FILES = ("settings.json", "GEMINI.md")
 _CREDS = ("oauth_creds.json", "google_accounts.json")
 
 
-def _dot_gemini(config_dir: str | Path) -> Path:
-    return Path(config_dir) / ".gemini"
+def _dot_gemini(config_dir: str | Path | None) -> Path:
+    """The account's ``.gemini`` folder. Core passes None for ``default``: the CLI's own home."""
+    home = config_dir or os.environ.get(HOME_ENV) or Path.home()
+    return Path(home) / ".gemini"
 
 
-def account_env(config_dir: str) -> dict[str, str]:
-    """Environment that runs ``gemini`` as the login kept in ``config_dir``."""
+def account_env(config_dir: str | None) -> dict[str, str]:
+    """Environment that runs ``gemini`` as the login kept in ``config_dir`` ({} for ``default``)."""
+    if not config_dir:
+        return {}
     folder = _dot_gemini(config_dir)
     folder.mkdir(parents=True, exist_ok=True)
     try:
@@ -84,14 +88,14 @@ def account_env(config_dir: str) -> dict[str, str]:
     return {HOME_ENV: str(config_dir)}
 
 
-def account_login(config_dir: str) -> dict[str, Any]:
+def account_login(config_dir: str | None) -> dict[str, Any]:
     """Gemini CLI has no ``auth login``: its first interactive run asks for the Google login."""
     from .cli_update import resolve_bin
 
     return {"argv": [resolve_bin("") or "gemini"], "env": account_env(config_dir)}
 
 
-def account_status(config_dir: str) -> dict[str, Any]:
+def account_status(config_dir: str | None) -> dict[str, Any]:
     folder = _dot_gemini(config_dir)
     status: dict[str, Any] = {"loggedIn": (folder / "oauth_creds.json").is_file()}
     try:
@@ -107,12 +111,12 @@ def is_gemini_logged_in() -> bool:
     """A Google login in the CLI's home, or an API key it can run on (env or the saved Google key)."""
     if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
         return True
-    if account_status(os.environ.get(HOME_ENV) or str(Path.home())).get("loggedIn"):
+    if account_status(None).get("loggedIn"):
         return True
     return bool(pick_gemini_key({})[1])
 
 
-def account_logout(config_dir: str) -> None:
+def account_logout(config_dir: str | None) -> None:
     for name in _CREDS:
         try:
             (_dot_gemini(config_dir) / name).unlink()

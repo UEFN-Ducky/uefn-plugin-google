@@ -97,6 +97,26 @@ def test_second_key_is_used_after_the_first_hits_429(monkeypatch) -> None:
     assert gca.pick_gemini_key({"GEMINI_CLI_HOME": "x"}) == ("", "")
 
 
+def test_default_account_hooks_take_none(tmp_path, monkeypatch) -> None:
+    """Core passes None for ``default``: Log in raised TypeError (Path(None))."""
+    from backend import cli_update
+    from backend.gemini_cli_adapter import account_env, account_login, account_logout, account_status
+
+    monkeypatch.setattr(cli_update, "resolve_bin", lambda _p: "gemini.cmd")
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
+    assert account_env(None) == {}
+    assert account_login(None) == {"argv": ["gemini.cmd"], "env": {}}  # the CLI's own home
+    assert account_status(None) == {"loggedIn": False}
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "oauth_creds.json").write_text("{}", encoding="utf-8")
+    assert account_status(None)["loggedIn"] is True
+    account_logout(None)
+    assert account_status(None)["loggedIn"] is False
+    fresh = tmp_path / "not-made-yet"
+    assert account_login(str(fresh))["env"] == {"GEMINI_CLI_HOME": str(fresh)}
+    assert (fresh / ".gemini").is_dir()
+
+
 def test_installed_cli_without_a_login_or_key_is_not_connected(tmp_path, monkeypatch) -> None:
     """A fresh PC with gemini on PATH showed 'Connected' in setup: detect left logged_in unset."""
     from backend import gemini_cli_adapter as gca
