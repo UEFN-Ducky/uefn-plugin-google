@@ -149,6 +149,27 @@ def test_run_env_signs_in_with_google_and_trusts_the_folder() -> None:
     assert "GEMINI_CLI_TRUST_WORKSPACE" not in keyed  # asks before changes: the CLI's own trust
 
 
+def test_a_refused_personal_login_says_what_to_do(tmp_path, monkeypatch) -> None:
+    """Google, since June 2026: IneligibleTierError for personal accounts in Gemini CLI."""
+    from backend import gemini_cli_adapter as gca
+
+    refused = ("Error authenticating: IneligibleTierError: This client is no longer supported for "
+               "Gemini Code Assist for individuals. To continue using Gemini, please migrate to Antigravity")
+    monkeypatch.setattr(gca, "run_streaming_process", lambda **kw: SimpleNamespace(
+        returncode=1, stderr_tail=refused, raw_tail="", stdout_lines=0, timed_out=False, cancelled=False))
+    monkeypatch.setattr("backend.cli_update.resolve_bin", lambda _p="": "gemini.cmd")
+    monkeypatch.setattr(gca, "pick_gemini_key", lambda _env: ("", ""))
+    monkeypatch.setattr(gca, "finalize_cli_turn", lambda **kw: SimpleNamespace(ok=False, error="Gemini CLI exited with code 1", reply_text=""))
+    updates = []
+    monkeypatch.setattr("backend.cli_update.update_cli", lambda *a: updates.append(a) or {"ok": True})
+    result = gca.GeminiCliAdapter().launch(
+        prompt="hey", system_prompt="", cwd=str(tmp_path), conv_id="c1", model="auto",
+        mcp_config_path="", extra_args="", cli_path="", env={}, push=lambda _e: None,
+    )
+    assert result.error == gca.PERSONAL_LOGIN_REFUSED and gca.KEY_URL in result.error
+    assert updates == []  # never "updating automatically" for a refusal
+
+
 def test_a_huge_system_prompt_never_reaches_the_command_line(tmp_path, monkeypatch) -> None:
     """[Errno 206] Prompt/command too long for Windows: the 100K system prompt went in argv."""
     from backend import gemini_cli_adapter as gca

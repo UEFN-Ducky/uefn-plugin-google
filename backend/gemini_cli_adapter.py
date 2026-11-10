@@ -216,6 +216,20 @@ def gemini_include_dirs(cwd: str) -> list[str]:
     return out
 
 
+KEY_URL = "https://aistudio.google.com/apikey"
+PERSONAL_LOGIN_REFUSED = (
+    "Google no longer lets personal Google accounts use Gemini CLI (since June 2026). "
+    f"Add a free Gemini API key instead ({KEY_URL}) in Settings → LLMs → Google → Add API key: "
+    "Gemini CLI then runs on the key. Company (paid Code Assist) accounts still sign in."
+)
+
+
+def personal_login_refused(*chunks: str) -> bool:
+    """Google refused a free personal login (IneligibleTierError / UNSUPPORTED_CLIENT)."""
+    low = "\n".join(c or "" for c in chunks).lower()
+    return "ineligibletiererror" in low or "no longer supported for gemini code assist for individuals" in low
+
+
 def run_env(env: dict[str, str], key: str, *, auto_approve: bool) -> dict[str, str]:
     """A chat run's environment. With a key: the key. Without one: the Google login
     (``GOOGLE_GENAI_USE_GCA``), else headless runs exit 41 "Please set an Auth method".
@@ -531,6 +545,9 @@ class GeminiCliAdapter:
         )
         if not result.ok:
             note_key_limit(key_account, result.error, state.error_text, proc.stderr_tail)
+            if personal_login_refused(result.error or "", state.error_text, proc.stderr_tail, proc.raw_tail):
+                result.error = PERSONAL_LOGIN_REFUSED
+                return result  # not a stale install: updating the CLI changes nothing
         if result.ok or not should_heal_launch(
             result.error or "",
             result.reply_text or "",
