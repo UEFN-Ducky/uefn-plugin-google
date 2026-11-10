@@ -53,7 +53,8 @@ def test_auto_approve_is_exposed_as_a_setting() -> None:
 def test_account_hooks_are_registered() -> None:
     api = _registered()
     agent = api.coding_agents["gemini_cli"]
-    for hook in ("account_env", "account_login", "account_status", "account_logout", "is_limit_error"):
+    hooks = ("account_env", "account_login", "account_browser_login", "account_status", "account_logout", "is_limit_error")
+    for hook in hooks:
         assert callable(agent[hook]), hook
     assert api.providers["gemini"]["is_quota_error"]("429 Too Many Requests")
 

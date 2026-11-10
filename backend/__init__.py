@@ -61,7 +61,8 @@ def register(api) -> None:
         install_help=_INSTALL_HELP,
         token_provider="gemini",
         account_env=gca.account_env,
-        account_login=gca.account_login,
+        account_login=gca.account_login,  # older cores: a terminal tab
+        account_browser_login=gca.account_browser_login,
         account_status=gca.account_status,
         account_logout=gca.account_logout,
         is_limit_error=gca.is_limit_error,

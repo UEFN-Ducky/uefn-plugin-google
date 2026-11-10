@@ -104,7 +104,18 @@ def account_status(config_dir: str | None) -> dict[str, Any]:
             status["email"] = email
     except Exception:
         pass
+    if not status["loggedIn"]:
+        from .gemini_auth import login_state
+
+        status.update(login_state(folder))  # pending / error of a browser sign-in
     return status
+
+
+def account_browser_login(config_dir: str | None) -> dict[str, Any]:
+    """Settings → Log in: Google sign-in in the browser, no terminal tab."""
+    from .gemini_auth import start_browser_login
+
+    return start_browser_login(config_dir)
 
 
 def is_gemini_logged_in() -> bool:
