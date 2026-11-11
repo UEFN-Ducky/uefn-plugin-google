@@ -139,6 +139,62 @@ def test_the_key_is_the_picked_key_account(monkeypatch):
     assert graph_nodes._secret("gemini") == "KEY-ed86"
 
 
+class _ToolApi:
+    def __init__(self, takes_visible=True):
+        self.tools, self.visible, self.takes_visible = {}, {}, takes_visible
+
+    def tool(self, *, name, intent=None, **kw):
+        if kw and not self.takes_visible:
+            raise TypeError("unexpected keyword argument 'visible'")
+        self.visible[name] = kw.get("visible")
+        return lambda fn: self.tools.setdefault(name, fn) and fn
+
+
+def test_the_plugin_gives_every_ducky_a_gemini_picture_tool(tmp_path, monkeypatch):
+    """An agent had to script the plugin by hand to make a Gemini picture: there was no tool."""
+    import pytest
+
+    from backend import graph_nodes
+
+    api = _ToolApi()
+    graph_nodes.register_tools(api)
+    assert set(api.tools) == {"gemini_generate_image", "gemini_image_models"}
+    seen = {}
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
+    monkeypatch.setattr(graph_nodes, "_gemini_http", lambda model, body, key: seen.update(model=model, body=body)
+                        or _picture("iVBORw=="))
+    monkeypatch.setattr(graph_nodes, "_persist", lambda raw, **kw: {
+        "path": str(tmp_path / "duck.png"), "media_url": "/generated/duck.png"})
+    (tmp_path / "duck.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out = api.tools["gemini_generate_image"]("a duck", model="gemini-3-pro-image")
+    info = json.loads(out[0] if isinstance(out, list) else out)
+    assert info["media_url"] == "/generated/duck.png" and info["model"] == "gemini-3-pro-image"  # the chat card shows it
+    assert info["path"].endswith("duck.png") and info["cost"] == "Your own API key"
+    assert seen["model"] == "gemini-3-pro-image" and seen["body"]["contents"][0]["parts"] == [{"text": "a duck"}]
+    with pytest.raises(ValueError, match="what the picture shows"):
+        api.tools["gemini_generate_image"]("  ")
+    assert api.visible["gemini_generate_image"]() is True
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "")
+    assert api.visible["gemini_generate_image"]() is False  # no key: no ducky is offered it
+    with pytest.raises(ValueError, match="Add a Google API key"):
+        api.tools["gemini_generate_image"]("a duck")
+
+    old = _ToolApi(takes_visible=False)  # a host from before visible=
+    graph_nodes.register_tools(old)
+    assert set(old.tools) == {"gemini_generate_image", "gemini_image_models"}
+
+
+def test_image_models_lists_only_picture_models(monkeypatch):
+    import io
+
+    from backend import graph_nodes
+
+    body = json.dumps({"models": [{"name": "models/gemini-3.8-flash"}, {"name": "models/gemini-2.5-flash-image"},
+                                  {"name": "models/gemini-3-pro-image"}]}).encode()
+    monkeypatch.setattr(graph_nodes.urllib.request, "urlopen", lambda url, timeout=0: io.BytesIO(body))
+    assert graph_nodes.image_models("k") == ["gemini-3-pro-image", "gemini-2.5-flash-image"]
+
+
 def test_registers_gemini_media_generator(tmp_path, monkeypatch):
     import pytest
 

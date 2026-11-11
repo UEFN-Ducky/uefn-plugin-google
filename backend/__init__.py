@@ -77,6 +77,8 @@ def register(api) -> None:
     from . import graph_nodes
 
     graph_nodes.register_nodes(api)
+    if hasattr(api, "tool"):  # gemini_generate_image, gemini_image_models
+        graph_nodes.register_tools(api)
     # hasattr: hosts older than register_media_generator just skip it
     if hasattr(api, "register_media_generator"):
         api.register_media_generator(

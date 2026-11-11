@@ -46,9 +46,13 @@ def _google_reason(exc: urllib.error.HTTPError) -> str:
 
 
 def _persist(raw: bytes, *, prompt: str, gateway: str, model: str) -> dict[str, Any]:
-    from frontend.ui_web.generated_images import save_generated_image
+    from frontend.ui_web import generated_images as gen
 
-    return save_generated_image(raw, prompt=prompt, gateway=gateway, model=model)
+    try:
+        chat = gen._chat_of_caller()  # the chat that asked: the picture is kept with it
+    except Exception:
+        chat = ""
+    return gen.save_generated_image(raw, prompt=prompt, gateway=gateway, model=model, conv_id=chat)
 
 
 def _pair(ctx: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -160,6 +164,8 @@ def handle_image(ctx: dict[str, Any]) -> dict[str, Any]:
         "files": [{"path": path, "name": saved.get("name") or "image.png"}],
         "path": path,
         "prompt": prompt,
+        "model": model,
+        "media_url": str(saved.get("media_url") or ""),
     }
 
 
@@ -170,6 +176,69 @@ def generate_image(prompt: str, **options: Any) -> dict[str, Any]:
     if not out.get("ok"):
         raise RuntimeError(out.get("error") or "Google made no picture")
     return {"path": out["path"], "mime": "image/png"}
+
+
+IMAGE_INTENT = r"\b(gemini|google|imagen|nano[- ]?banana|image|picture|draw|illustration|concept art)\b"
+
+
+def image_models(key: str) -> list[str]:
+    """The image models this key may use, newest names first (one free listing)."""
+    q = urllib.parse.urlencode({"key": key, "pageSize": 1000})
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?{q}"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        rows = json.loads(resp.read().decode("utf-8")).get("models") or []
+    ids = [str(row.get("name") or "").replace("models/", "") for row in rows if isinstance(row, dict)]
+    return sorted((i for i in ids if "image" in i), reverse=True)
+
+
+def register_tools(api: Any) -> None:
+    """Gemini's pictures as tools every ducky can call: the plugin's own, so no agent has to
+    script around it and the picture shows in the chat like any other maker's."""
+
+    def has_key() -> bool:  # from disk, never the network: it runs on every tool listing
+        return bool(_secret("gemini"))
+
+    def tool(name: str) -> Any:
+        try:
+            return api.tool(name=name, intent=IMAGE_INTENT, visible=has_key)
+        except TypeError:  # a host from before visible=
+            return api.tool(name=name, intent=IMAGE_INTENT)
+
+    @tool("gemini_generate_image")
+    def gemini_generate_image(prompt: str, model: str = "", image: str = "") -> Any:
+        """Make a picture with Google Gemini and show it in this chat. Runs on the person's own
+        Google API key (Settings > LLMs > Google): asking for the picture is the yes, no credits.
+        prompt: what the picture shows. image: path of a reference picture to edit or restyle
+        (optional). model: a Gemini image model (optional; gemini_image_models lists them; the
+        default is gemini-2.5-flash-image). Returns the picture, so you see it, and its path."""
+        text = str(prompt or "").strip()
+        if not text:
+            raise ValueError("Say what the picture shows (prompt).")
+        out = handle_image({"config": {"prompt": text, "model": str(model or "").strip(),
+                                       "image": str(image or "").strip()}, "payload": {}})
+        if not out.get("ok"):
+            raise ValueError(str(out.get("error") or "Google made no picture."))
+        info = json.dumps({"path": str(out["path"]).replace("\\", "/"), "media_url": out.get("media_url") or "",
+                           "model": out.get("model") or "", "maker": "Google Gemini", "cost": "Your own API key"})
+        try:
+            from backend.tools.core.model_picture import model_picture
+
+            return [info, model_picture(str(out["path"]))]
+        except Exception:  # an older host: the card still shows the picture from media_url
+            return info
+
+    @tool("gemini_image_models")
+    def gemini_image_models() -> str:
+        """List the Gemini image models the person's Google API key can use (free, no picture made)."""
+        key = _secret("gemini")
+        if not key:
+            raise ValueError("Add a Google API key in Settings → LLMs → Google to make pictures.")
+        try:
+            return json.dumps({"default": GEMINI_IMAGE, "models": image_models(key)})
+        except urllib.error.HTTPError as exc:
+            raise ValueError(_google_reason(exc)) from exc
+        except OSError as exc:
+            raise ValueError(f"Could not reach Google: {exc}") from exc
 
 
 def register_nodes(api: Any) -> None:
