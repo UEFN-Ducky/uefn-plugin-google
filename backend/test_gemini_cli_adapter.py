@@ -25,6 +25,83 @@ def test_google_login_without_a_key_still_lists_the_cli_aliases(monkeypatch) -> 
     assert [r["id"] for r in gca._gemini_cli_model_rows()] == ["auto", "pro", "flash", "flash-lite"]
 
 
+def test_a_saved_key_does_not_repeat_the_api_models_as_cli_rows(monkeypatch) -> None:
+    """People on an API key picked one of the repeated rows and ran Gemini CLI unknowingly."""
+    import backend.agent.secrets as secrets
+
+    monkeypatch.setattr(secrets, "get_key", lambda _p: "AIza-key")
+    from backend import gemini_cli_adapter as gca
+
+    assert [r["id"] for r in gca._gemini_cli_model_rows()] == ["auto", "pro", "flash", "flash-lite"]
+
+
+def _launch(monkeypatch, tmp_path, results, *, session_id="", key=("", ""), home="", stderr=""):
+    """Run launch() against fake CLI runs; returns (result, [run kwargs], [finalize kwargs])."""
+    from backend import gemini_cli_adapter as gca
+
+    runs: list[dict] = []
+    finals: list[dict] = []
+    monkeypatch.setattr(gca, "run_streaming_process", lambda **kw: runs.append(kw) or SimpleNamespace(
+        returncode=0, stderr_tail=stderr, raw_tail="", stdout_lines=0, timed_out=False, cancelled=False))
+    monkeypatch.setattr("backend.cli_update.resolve_bin", lambda _p="": "gemini.cmd")
+    monkeypatch.setattr("backend.gemini_home.prepare_home", lambda *a, **k: home)
+    monkeypatch.setattr(gca, "pick_gemini_key", lambda _env: key)
+    monkeypatch.setattr(gca, "note_key_limit", lambda *a: None)
+    queue = list(results)
+    monkeypatch.setattr(gca, "finalize_cli_turn", lambda **kw: finals.append(kw) or queue.pop(0))
+    result = gca.GeminiCliAdapter().launch(
+        prompt="hey", system_prompt="RULES", cwd=str(tmp_path), conv_id="c1", model="auto",
+        mcp_config_path="", extra_args="", cli_path="", env={}, push=lambda _e: None, session_id=session_id,
+    )
+    return result, runs, finals
+
+
+def _res(ok, *, error="", status="", reply=""):
+    return SimpleNamespace(ok=ok, error=error, status=status or ("done" if ok else "error"),
+                           reply_text=reply, blocks=[], upstream_session_id="s2")
+
+
+def test_a_followup_resumes_the_session_and_does_not_resend_the_system_prompt(monkeypatch, tmp_path) -> None:
+    """Every turn used to be a new CLI run carrying the whole system prompt and history."""
+    _result, runs, finals = _launch(monkeypatch, tmp_path, [_res(True)], session_id="sess-1", home=str(tmp_path / "h"))
+    argv = runs[0]["argv"]
+    assert argv[argv.index("--resume") + 1] == "sess-1"
+    assert runs[0]["stdin_data"] == ""  # the session already holds it
+    assert runs[0]["env_extra"]["GEMINI_CLI_HOME"] == str(tmp_path / "h")
+    _result, runs, _finals = _launch(monkeypatch, tmp_path, [_res(True)], home=str(tmp_path / "h"))
+    assert runs[0]["stdin_data"].startswith("RULES") and "ducky_call_tool" in runs[0]["stdin_data"]
+    assert finals[0]["session_id"] == "sess-1" and finals[0]["new_session"] == "sess-1"
+
+
+def test_a_first_turn_sends_the_system_prompt_once(monkeypatch, tmp_path) -> None:
+    _result, runs, _finals = _launch(monkeypatch, tmp_path, [_res(True)])
+    assert "--resume" not in runs[0]["argv"] and runs[0]["stdin_data"] == "RULES"
+    assert "GEMINI_CLI_HOME" not in runs[0]["env_extra"]  # no home could be made: the CLI's own
+
+
+def test_a_session_the_cli_lost_runs_once_more_as_a_new_one(monkeypatch, tmp_path) -> None:
+    result, runs, _finals = _launch(
+        monkeypatch, tmp_path, [_res(False, error="Gemini CLI exited with code 1"), _res(True, reply="hi")],
+        session_id="gone")
+    assert result.ok and len(runs) == 2
+    assert "--resume" in runs[0]["argv"] and "--resume" not in runs[1]["argv"]
+    assert runs[1]["stdin_data"] == "RULES"
+
+
+def test_a_429_is_said_plainly_and_never_run_again(monkeypatch, tmp_path) -> None:
+    """'Gemini CLI exited with code 1: status: 429 | } | An unexpected critical error occurred:[object Object]'"""
+    from backend import gemini_cli_adapter as gca
+
+    raw = "Gemini CLI exited with code 1: status: 429 | } | An unexpected critical error occurred:[object Object]"
+    result, runs, _finals = _launch(monkeypatch, tmp_path, [_res(False, error=raw)], session_id="s1", key=("default", "K"))
+    assert len(runs) == 1  # a rate limit is not a lost session: no second run on the same quota
+    assert result.error == gca.KEY_RATE_LIMITED and "object Object" not in result.error
+    assert gca.is_limit_error(result.error)  # core still moves to the next key
+
+    result, _runs, _finals = _launch(monkeypatch, tmp_path, [_res(False, error=raw)])
+    assert result.error == gca.LOGIN_RATE_LIMITED
+
+
 def test_picker_is_empty_without_a_live_catalog(monkeypatch) -> None:
     monkeypatch.setattr("backend.gemini_cli_adapter._gemini_cli_model_rows", lambda: [])
     assert GeminiCliAdapter().detect(settings=None).models == []

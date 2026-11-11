@@ -62,7 +62,10 @@ def gemini_thinking_config(model: str, thinking_effort: str) -> dict[str, Any] |
     is_3 = "gemini-3" in mid
     if is_3:
         if effort == "off":
-            return None
+            # Gemini 3 can't turn thinking off, and no setting at all means its default: the
+            # most thinking, billed as output. Off asks for "low", the least every Gemini 3
+            # model takes ("minimal" is a 400 on gemini-3.8-flash, tried live Nov 11 2026).
+            return {"thinking_level": "low"}
         level = "high" if ("pro" in mid and effort == "medium") else effort
         return {"thinking_level": level}
     if effort == "off":
@@ -70,6 +73,21 @@ def gemini_thinking_config(model: str, thinking_effort: str) -> dict[str, Any] |
             return None
         return {"thinking_budget": 0}
     return {"thinking_budget": BUDGET.get(effort, 8192)}
+
+# Where a text-channel tool call starts: live text is shown up to here, the rest is read
+# once the turn ends (a call must never flash on screen as text).
+_LEAK_START = re.compile(r"\[(?:Tool call:|Called tool)", re.IGNORECASE)
+_LEAK_HEAD_MAX = len("[Called tool")
+
+
+def streamable_end(text: str, shown: int) -> int:
+    """How far ``text`` can be shown now: up to a leaked call, or a ``[`` that may start one."""
+    hit = _LEAK_START.search(text, shown)
+    if hit:
+        return hit.start()
+    bracket = text.rfind("[", max(shown, len(text) - _LEAK_HEAD_MAX))
+    return bracket if bracket >= 0 else len(text)
+
 
 # Gemini (lite / thinking, especially) sometimes writes the call as text
 # instead of a functionCall part — then the turn looks finished and the user
@@ -329,7 +347,11 @@ class GeminiProvider:
         }
         thinking = gemini_thinking_config(self._model, self._thinking_effort)
         if thinking:
+            if self._thinking_effort != "off":
+                # Thought summaries, so a long think shows as thinking instead of a stuck chat.
+                thinking = {**thinking, "include_thoughts": True}
             config["thinking_config"] = thinking
+        shown = 0  # how much of collected_text has been sent to the chat
         response = client.models.generate_content_stream(
             model=self._model,
             contents=self._to_gemini_contents(messages),
@@ -371,15 +393,22 @@ class GeminiProvider:
                     continue
                 if part.text:
                     collected_text += part.text
+                    # Live: the reply used to arrive in one piece when the model finished,
+                    # so a long answer looked like a chat that never answered.
+                    end = streamable_end(collected_text, shown)
+                    if end > shown:
+                        yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=collected_text[shown:end])
+                        shown = end
         if cancelled:
             return
+        _, held_back = extract_leaked_tool_calls(collected_text[shown:])
         leaked, collected_text = extract_leaked_tool_calls(collected_text)
         _merge_tool_calls(tool_calls, leaked)
         if not tool_calls:
             thought_leaked, _ = extract_leaked_tool_calls(thought_text)
             _merge_tool_calls(tool_calls, thought_leaked)
-        if collected_text:
-            yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=collected_text)
+        if held_back:
+            yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=held_back)
         # Store the raw model Content (with thought_signatures) so the next
         # tool-loop iteration can echo it back without losing signatures.
         if tool_calls:

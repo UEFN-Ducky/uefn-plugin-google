@@ -38,27 +38,10 @@ CLI_ALIAS_ROWS = (
 
 
 def _gemini_cli_model_rows() -> list[dict[str, str]]:
-    """Live Gemini models.list with the saved key; the CLI's aliases without one (or when it fails)."""
-    aliases = [dict(r) for r in CLI_ALIAS_ROWS]
-    try:
-        from backend.agent.secrets import get_key
-
-        key = (get_key("gemini") or "").strip()
-    except Exception:
-        key = ""
-    if not key:
-        return aliases
-    try:
-        from .model_fetch import fetch_models
-
-        rows = [
-            {"id": info.id, "name": info.display_name or info.id, "provider": "Gemini CLI"}
-            for info in fetch_models(key)
-            if info.id
-        ]
-    except Exception:
-        rows = []
-    return aliases + rows
+    """The CLI's own aliases, with or without a key. It used to repeat every API model here
+    once a key was saved: people on an API key picked one of those rows and ran Gemini CLI
+    without knowing (its 429 retries and per-turn overhead burned their free quota)."""
+    return [dict(r) for r in CLI_ALIAS_ROWS]
 
 
 def _gemini_missing_status() -> str:
@@ -174,6 +157,21 @@ def is_limit_error(text: str) -> bool:
     return isinstance(text, str) and bool(_LIMIT_RE.search(text))
 
 
+# Keeps "rate limit" and "429" so is_limit_error still reads it (core's account switch).
+KEY_RATE_LIMITED = (
+    "This Gemini key hit Google's rate limit (429). Free keys allow only a few requests a "
+    "minute: wait a minute and send again, pick a Flash model, or add another key in "
+    "Settings → LLMs → Google."
+)
+LOGIN_RATE_LIMITED = (
+    "This Google account hit its Gemini rate limit (429). Wait a minute and send again, or "
+    "add an API key in Settings → LLMs → Google."
+)
+# What the CLI says when --resume names a session it no longer has.
+STALE_SESSION_MARKERS = ("session not found", "no session", "invalid session", "could not find session",
+                         "error resuming session", "no previous sessions")
+
+
 def pick_gemini_key(env: dict[str, str]) -> tuple[str, str]:
     """(key account id, key) for this turn; ``("", "")`` when a login account or a key is already set."""
     if env.get("GEMINI_API_KEY") or env.get(HOME_ENV):
@@ -278,8 +276,12 @@ def build_gemini_argv(
     extra_args: str,
     auto_approve: bool = True,
     include_dirs: list[str] | None = None,
+    session_id: str = "",
 ) -> list[str]:
     argv = [binary, "-p", prompt]
+    sid = (session_id or "").strip()
+    if sid:
+        argv.extend(["--resume", sid])
     if auto_approve:
         # -y approves every action, including file writes and shell commands.
         argv.append("-y")
@@ -410,12 +412,11 @@ class GeminiCliAdapter:
         terminal_agent=True,
         chat_api=False,
         a2a=True,
-        # headless `-p` takes no MCP flag, so launch() cannot forward the host's
-        # config — claiming injection would hide that UEFN tools are unavailable.
-        mcp_inject=False,
+        # launch() puts the host's config in the chat's own CLI home (gemini_home).
+        mcp_inject=True,
         needs_api_key=False,
         needs_cli=True,
-        resume=False,
+        resume=True,
     )
 
     def _auto_approve(self) -> bool:
@@ -484,7 +485,7 @@ class GeminiCliAdapter:
         timeout_s: float = 0.0,
         image_paths: list[str] | None = None,
     ) -> CodingAgentLaunchResult:
-        del mcp_config_path, session_id, image_paths  # ponytail: headless -p has no resume/MCP flags yet
+        del image_paths  # ponytail: headless -p takes no picture paths yet
         model_id = (model or "").strip()
         if not model_id or model_id.lower() == "default":
             return CodingAgentLaunchResult(
@@ -493,6 +494,7 @@ class GeminiCliAdapter:
                 status="error",
             )
         from .cli_update import resolve_bin, should_heal_launch, update_cli
+        from .gemini_home import TOOLS_NOTE, prepare_home
 
         binary = resolve_bin(cli_path)
         if not binary:
@@ -512,65 +514,87 @@ class GeminiCliAdapter:
                     error=str(upd.get("error") or "Gemini CLI not found and auto-install failed"),
                     status="error",
                 )
-        # Windows caps a command line at ~32K characters ([Errno 206]): the system prompt (and
-        # a long message) go in on stdin, which the CLI puts ahead of the -p text.
-        arg_prompt, stdin_prompt = split_gemini_prompt(system_prompt, prompt)
 
         # Prefer the Google gateway API key (the picked key account) unless a login account runs.
         key_account, key = pick_gemini_key(env)
+        login_dot = _dot_gemini(env.get(HOME_ENV) or None)  # the account's own folder
         env = run_env(env, key, auto_approve=self._auto_approve())
+        # The chat's own CLI home: Ducky's tools, a short retry budget, and its sessions.
+        home = prepare_home(conv_id, mcp_config_path, None if key else login_dot)
+        if home:
+            env[HOME_ENV] = home
+            system_prompt = f"{system_prompt}\n\n{TOOLS_NOTE}" if (system_prompt or "").strip() else TOOLS_NOTE
+        tails: list[str] = []
 
-        argv = build_gemini_argv(
-            binary=binary,
-            prompt=arg_prompt,
-            model=model_id,
-            extra_args=extra_args,
-            auto_approve=self._auto_approve(),
-            include_dirs=gemini_include_dirs(cwd),
-        )
-        state = _GeminiStream(conv_id, run_id, push)
+        def run(sid: str, exe: str) -> CodingAgentLaunchResult:
+            # Windows caps a command line at ~32K characters ([Errno 206]): the system prompt
+            # (and a long message) go in on stdin, which the CLI puts ahead of the -p text.
+            # A resumed session already holds the system prompt: it is not sent again.
+            arg_prompt, stdin_prompt = split_gemini_prompt("" if sid else system_prompt, prompt)
+            argv = build_gemini_argv(
+                binary=exe,
+                prompt=arg_prompt,
+                model=model_id,
+                extra_args=extra_args,
+                auto_approve=self._auto_approve(),
+                include_dirs=gemini_include_dirs(cwd),
+                session_id=sid,
+            )
+            state = _GeminiStream(conv_id, run_id, push)
+            proc = run_streaming_process(
+                argv=argv,
+                cwd=cwd,
+                env_extra=env,
+                conv_id=conv_id,
+                on_line=state.on_line,
+                timeout_s=timeout_s,
+                cancel=cancel,
+                stdin_data=stdin_prompt,
+            )
+            streamed_all = "".join(state.text_parts).strip()
+            tails[:] = [proc.stderr_tail or "", proc.raw_tail or "", state.error_text or ""]
+            return finalize_cli_turn(
+                proc=proc,
+                reply=streamed_all,
+                streamed=bool(streamed_all) or bool(state.blocks),
+                blocks=state.blocks,
+                session_id=sid,
+                new_session=state.session_id or sid,
+                usage=state.usage,
+                agent_label="Gemini CLI",
+                timeout_s=timeout_s,
+                error_text=state.error_text,
+                stale_session_markers=STALE_SESSION_MARKERS,
+            )
+
+        def limited(res: Any) -> bool:
+            return any(is_limit_error(t) for t in (res.error or "", *tails) if t)
+
         push({"type": "status", "text": "Starting Gemini CLI…", "conv_id": conv_id, "run_id": run_id})
-        proc = run_streaming_process(
-            argv=argv,
-            cwd=cwd,
-            env_extra=env,
-            conv_id=conv_id,
-            on_line=state.on_line,
-            timeout_s=timeout_s,
-            cancel=cancel,
-            stdin_data=stdin_prompt,
-        )
-        streamed_all = "".join(state.text_parts).strip()
-        reply = streamed_all
-        result = finalize_cli_turn(
-            proc=proc,
-            reply=reply,
-            streamed=bool(streamed_all) or bool(state.blocks),
-            blocks=state.blocks,
-            session_id="",
-            new_session=state.session_id,
-            usage=state.usage,
-            agent_label="Gemini CLI",
-            timeout_s=timeout_s,
-            error_text=state.error_text,
-        )
-        if not result.ok:
-            note_key_limit(key_account, result.error, state.error_text, proc.stderr_tail)
-            if personal_login_refused(result.error or "", state.error_text, proc.stderr_tail, proc.raw_tail):
-                result.error = PERSONAL_LOGIN_REFUSED
-                if not key:  # the login account was refused: its row says so from now on
-                    from .gemini_auth import NO_ACCESS, _refresh_agents, write_access
+        sid = (session_id or "").strip()
+        result = run(sid, binary)
+        if (sid and not result.ok and getattr(result, "status", "") == "error" and not limited(result)
+                and not result.reply_text and not getattr(result, "blocks", None)):
+            # The CLI no longer has that session (or can't open it): once more as a new one,
+            # system prompt included, so the chat never wedges on a dead session id.
+            sid = ""
+            result = run(sid, binary)
+        if result.ok:
+            return result
+        note_key_limit(key_account, result.error, *tails)
+        if personal_login_refused(result.error or "", *tails):
+            result.error = PERSONAL_LOGIN_REFUSED
+            if not key:  # the login account was refused: its row says so from now on
+                from .gemini_auth import NO_ACCESS, _refresh_agents, write_access
 
-                    write_access(_dot_gemini(env.get(HOME_ENV) or None), False, NO_ACCESS)
-                    _refresh_agents()
-                return result  # not a stale install: updating the CLI changes nothing
-        if result.ok or not should_heal_launch(
-            result.error or "",
-            result.reply_text or "",
-            proc.stderr_tail,
-            proc.raw_tail,
-            state.error_text,
-        ):
+                write_access(login_dot, False, NO_ACCESS)
+                _refresh_agents()
+            return result  # not a stale install: updating the CLI changes nothing
+        if limited(result):
+            # Said plainly: the CLI's own text is "status: 429 | } | ...[object Object]".
+            result.error = KEY_RATE_LIMITED if key else LOGIN_RATE_LIMITED
+            return result
+        if not should_heal_launch(result.error or "", result.reply_text or "", *tails):
             return result
         push(
             {
@@ -588,35 +612,10 @@ class GeminiCliAdapter:
                 + str(upd.get("error") or "unknown")
             )
             return result
-        binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
-        argv[0] = binary
-        state = _GeminiStream(conv_id, run_id, push)
-        proc = run_streaming_process(
-            argv=argv,
-            cwd=cwd,
-            env_extra=env,
-            conv_id=conv_id,
-            on_line=state.on_line,
-            timeout_s=timeout_s,
-            cancel=cancel,
-            stdin_data=stdin_prompt,
-        )
-        streamed_all = "".join(state.text_parts).strip()
-        retried = finalize_cli_turn(
-            proc=proc,
-            reply=streamed_all,
-            streamed=bool(streamed_all) or bool(state.blocks),
-            blocks=state.blocks,
-            session_id="",
-            new_session=state.session_id,
-            usage=state.usage,
-            agent_label="Gemini CLI",
-            timeout_s=timeout_s,
-            error_text=state.error_text,
-        )
+        retried = run(sid, resolve_bin(cli_path) or str(upd.get("cli_path") or binary))
         from .cli_update import BROKEN_INSTALL, error_line, is_broken_install_error
 
-        tails = (retried.error or "", proc.stderr_tail, proc.raw_tail, state.error_text)
-        if not retried.ok and is_broken_install_error(*tails):  # once only: never a reinstall loop
-            retried.error = f"{BROKEN_INSTALL}: {error_line(chr(10).join(t or '' for t in tails))}"
+        after = (retried.error or "", *tails)
+        if not retried.ok and is_broken_install_error(*after):  # once only: never a reinstall loop
+            retried.error = f"{BROKEN_INSTALL}: {error_line(chr(10).join(after))}"
         return retried

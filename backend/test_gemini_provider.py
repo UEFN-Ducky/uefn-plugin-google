@@ -172,6 +172,53 @@ def test_text_parts_still_stream_normally() -> None:
     assert done.stop_reason == "stop"
 
 
+def test_text_reaches_the_chat_chunk_by_chunk() -> None:
+    """The reply used to be held until the model finished: a long answer looked stuck."""
+    chunks = [
+        _chunk(parts=[SimpleNamespace(text="Un ", function_call=None)]),
+        _chunk(parts=[SimpleNamespace(text="deux ", function_call=None)]),
+        _chunk(parts=[SimpleNamespace(text="trois", function_call=None)], finish_reason="STOP"),
+    ]
+
+    events = _run_turn(_provider(), chunks)
+
+    assert [e.text for e in events if e.kind is StreamEventKind.TEXT_DELTA] == ["Un ", "deux ", "trois"]
+    assert next(e for e in events if e.kind is StreamEventKind.DONE).text == "Un deux trois"
+
+
+def test_a_leaked_call_split_across_chunks_is_never_shown() -> None:
+    head, tail = _LEAKED_EXECUTE_PYTHON[:7], _LEAKED_EXECUTE_PYTHON[7:]
+    chunks = [
+        _chunk(parts=[SimpleNamespace(text="Je regarde [1]. " + head, function_call=None)]),
+        _chunk(parts=[SimpleNamespace(text=tail, function_call=None)], finish_reason="STOP"),
+    ]
+
+    events = _run_turn(_provider(), chunks)
+
+    shown = "".join(e.text for e in events if e.kind is StreamEventKind.TEXT_DELTA)
+    assert shown == "Je regarde [1]. "
+    assert next(e for e in events if e.kind is StreamEventKind.TOOL_CALLS).tool_calls[0].name == "execute_python"
+
+
+def test_thoughts_are_asked_for_only_when_thinking_is_on() -> None:
+    seen: list[dict] = []
+
+    def run(effort: str) -> dict:
+        provider = GeminiProvider("k", "gemini-2.5-flash", thinking_effort=effort)
+        provider._client = lambda: SimpleNamespace(  # type: ignore[method-assign]
+            models=SimpleNamespace(generate_content_stream=lambda **kw: seen.append(kw) or iter([])))
+
+        async def go() -> None:
+            async for _ in provider.stream_turn(system="s", messages=[ProviderMessage(role="user", content="x")], tools=[]):
+                pass
+
+        asyncio.run(go())
+        return seen[-1]["config"]["thinking_config"]
+
+    assert run("high") == {"thinking_budget": 16384, "include_thoughts": True}
+    assert run("off") == {"thinking_budget": 0}
+
+
 _LEAKED_EXECUTE_PYTHON = (
     '[Tool call: mcp__uefn__execute_python({"code": '
     '"import unreal\\nacts = unreal.EditorLevelLibrary.get_all_level_actors()\\nprint(len(acts))\\n"})]'
