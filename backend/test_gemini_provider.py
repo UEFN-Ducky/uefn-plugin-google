@@ -107,6 +107,58 @@ def test_function_response_carries_the_called_function_name() -> None:
     assert responses[0].name == "search_assets"
 
 
+def test_tool_results_survive_the_live_context_note_core_ends_every_step_with() -> None:
+    """Seen live: get_status + call_tool seven times, then the loop guard, never a reply.
+    Core's last message of every step is a user note; the provider read that as a new turn,
+    forgot its tool calls and replayed them as text with the results left out."""
+    provider = _provider()
+    fc = SimpleNamespace(name="search_assets", args={"search": "bench"})
+    _run_turn(provider, [_chunk(parts=[SimpleNamespace(text=None, function_call=fc)], finish_reason="STOP")])
+    assert len(provider._fc_contents) == 1
+
+    step_two = _tool_loop_messages() + [ProviderMessage(role="user", content="[live context] UEFN online")]
+    seen: list[dict] = []
+    provider._client = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        models=SimpleNamespace(generate_content_stream=lambda **kw: seen.append(kw) or iter([])))
+
+    async def go() -> None:
+        async for _ in provider.stream_turn(system="s", messages=step_two, tools=[]):
+            pass
+
+    asyncio.run(go())
+    responses = _function_responses(seen[0]["contents"])
+    assert [r.name for r in responses] == ["search_assets"]
+    assert responses[0].response == {"result": '{"assets": ["CP_PrincessCastle_Bench_C"]}'}
+    assert len(provider._fc_contents) == 1  # kept for the next step
+
+
+def test_two_calls_in_one_step_are_answered_in_one_turn() -> None:
+    provider = _provider()
+    provider._fc_contents = [types.Content(role="model", parts=[
+        types.Part(function_call=types.FunctionCall(name="a", args={})),
+        types.Part(function_call=types.FunctionCall(name="b", args={})),
+    ])]
+    messages = [
+        ProviderMessage(role="user", content="go"),
+        ProviderMessage(role="assistant", tool_calls=[ToolCallRequest(id="1", name="a", arguments={}),
+                                                      ToolCallRequest(id="2", name="b", arguments={})]),
+        ProviderMessage(role="tool", tool_call_id="1", content="A"),
+        ProviderMessage(role="tool", tool_call_id="2", content="B"),
+    ]
+    contents = provider._to_gemini_contents(messages)
+    assert [c.role for c in contents] == ["user", "model", "user"]
+    assert [p.function_response.name for p in contents[-1].parts] == ["a", "b"]
+
+
+def test_an_earlier_turns_tool_result_is_still_told_to_the_model() -> None:
+    """Replayed as text (no live call syntax), result included: it used to be left out."""
+    contents = _provider()._to_gemini_contents(_tool_loop_messages() + [ProviderMessage(role="user", content="and now?")])
+    texts = [p.text for c in contents for p in (c.parts or []) if p.text]
+    assert any("Already ran `search_assets`" in t for t in texts)
+    assert any("CP_PrincessCastle_Bench_C" in t and "Result of `search_assets`" in t for t in texts)
+    assert not _function_responses(contents)
+
+
 def test_function_response_name_falls_back_to_the_call_id() -> None:
     """An unmatched result must still be non-empty: Gemini rejects an empty name."""
     provider = _provider()

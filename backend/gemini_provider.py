@@ -220,15 +220,12 @@ class GeminiProvider:
             i for i, m in enumerate(messages)
             if m.role == "assistant" and m.tool_calls
         ]
-        n_stored = len(self._fc_contents)
         n_fc = len(fc_indices)
-        # The last `n_stored` fc-assistant messages come from the current
-        # tool-loop; earlier ones are historical and lack thought_signatures.
-        raw_map: dict[int, Any] = {}
-        if n_stored > 0 and n_fc > 0:
-            for offset, msg_i in enumerate(fc_indices[max(0, n_fc - n_stored):]):
-                if offset < n_stored:
-                    raw_map[msg_i] = self._fc_contents[offset]
+        # The last stored contents belong to the last fc-assistant messages (this run's tool
+        # loop); earlier ones are historical and lack thought_signatures. When core trimmed
+        # some of this run's steps away, the newest stored ones are the ones still here.
+        stored = self._fc_contents[-n_fc:] if n_fc else []
+        raw_map: dict[int, Any] = dict(zip(fc_indices[n_fc - len(stored):], stored))
 
         # Gemini pairs a functionResponse to its functionCall by NAME (unlike
         # Anthropic/OpenAI, which pair by id), and rejects an empty one. Answering
@@ -244,23 +241,26 @@ class GeminiProvider:
         # When we flatten a historical assistant+tool_calls to text, the
         # subsequent tool-role messages are orphaned — skip them.
         skip_tool_msgs = False
+        answering = False  # the last content is this step's function responses
 
         for i, m in enumerate(messages):
             if m.role == "tool":
+                name = call_names.get(m.tool_call_id) or m.tool_call_id or "tool"
                 if skip_tool_msgs:
-                    continue
-                contents.append(
-                    types.Content(
-                        role="user",
-                        parts=[
-                            types.Part.from_function_response(
-                                name=call_names.get(m.tool_call_id) or m.tool_call_id or "tool",
-                                response={"result": m.content},
-                            )
-                        ],
-                    )
-                )
+                    # A step replayed as text (an earlier turn, or this provider was made
+                    # anew mid-run): its result goes back as text too. Leaving it out hid
+                    # every earlier tool result from the model, which then ran the tool again.
+                    part = types.Part.from_text(text=f"Result of `{name}`:\n{m.content}")
+                else:
+                    part = types.Part.from_function_response(name=name, response={"result": m.content})
+                # The answers to one step's calls go back as one turn, as Gemini sent them.
+                if answering:
+                    contents[-1].parts.append(part)
+                else:
+                    contents.append(types.Content(role="user", parts=[part]))
+                answering = True
                 continue
+            answering = False
 
             # Any non-tool message resets the skip flag.
             skip_tool_msgs = False
@@ -324,10 +324,13 @@ class GeminiProvider:
         cancel_event: Any | None = None,
         cache: PromptCachePayload | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        # Reset stored raw contents on a new user turn (not a tool-loop continuation).
-        if messages and messages[-1].role != "tool":
-            self._fc_contents = []
-
+        # No reset of the stored tool-call contents here. It used to clear them whenever the
+        # last message wasn't a tool result, as "a new user turn". Core ends every step's
+        # messages with a live-context note from the user, so they were cleared on every
+        # step: each tool call was replayed as "Already ran X" with its result left out, the
+        # model never saw an answer and called the same tools until the loop guard stopped it
+        # (seen live Nov 11 2026: get_status + call_tool seven times, no reply). A provider
+        # lives for one run, so the list starts empty by itself.
         client = self._client()
         collected_text = ""
         thought_text = ""
