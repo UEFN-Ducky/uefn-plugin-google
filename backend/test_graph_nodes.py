@@ -340,24 +340,24 @@ def test_gemini_omni_video_goes_through_the_interactions_api(tmp_path, monkeypat
 
     from backend import graph_nodes
 
+    import io
+
     asked = {}
 
-    class Interactions:
-        def create(self, **kw):
-            asked.update(kw)
-            return types.SimpleNamespace(model_dump=lambda exclude_none=True: {"steps": [
-                {"type": "thought", "summary": "planning"},
-                {"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4",
-                                                      "data": base64.b64encode(b"MP4DATA").decode()}]}]})
+    def fake(req, timeout=0):  # the answer's shape as Google sent it live: steps[].content[]
+        asked.update(url=req.full_url, body=json.loads(req.data))
+        return io.BytesIO(json.dumps({"id": "v1_x", "status": "completed", "steps": [
+            {"type": "thought", "signature": "sig"},
+            {"type": "model", "content": [{"type": "video", "mime_type": "video/mp4",
+                                           "data": base64.b64encode(b"MP4DATA").decode()}]}]}).encode())
 
-    fake = types.SimpleNamespace(Client=lambda api_key: types.SimpleNamespace(interactions=Interactions()))
-    monkeypatch.setattr(sys.modules["google"], "genai", fake, raising=False)
-    monkeypatch.setitem(sys.modules, "google.genai", fake)
+    monkeypatch.setattr(graph_nodes.urllib.request, "urlopen", fake)
     assert graph_nodes._omni_video("gemini-omni-1.2-flash", "a duck", "K", 6, "9:16") == b"MP4DATA"
-    assert asked == {"model": "gemini-omni-1.2-flash", "input": "a duck",
-                     "response_format": {"type": "video", "aspect_ratio": "9:16", "duration": "6s"}}
+    assert asked["url"].endswith("/v1beta/interactions?key=K")
+    assert asked["body"] == {"model": "gemini-omni-1.2-flash", "input": "a duck",
+                             "response_format": {"type": "video", "aspect_ratio": "9:16", "duration": "6s"}}
     graph_nodes._omni_video("gemini-omni-1.2-flash", "a duck", "K", 0, "")
-    assert asked["response_format"] == {"type": "video"}  # the model's own defaults
+    assert asked["body"]["response_format"] == {"type": "video"}  # the model's own defaults
 
     api = _ToolApi()
     graph_nodes.register_tools(api)
@@ -369,11 +369,16 @@ def test_gemini_omni_video_goes_through_the_interactions_api(tmp_path, monkeypat
     assert out["made"] is True and out["media_url"] == "/generated/clip.mp4" and out["maker"] == "Google Gemini Omni"
     assert saved["raw"] == b"MP4DATA" and saved["model"] == "gemini-omni-1.2-flash"
 
-    old = types.SimpleNamespace(Client=lambda api_key: types.SimpleNamespace())  # a library before interactions
-    monkeypatch.setitem(sys.modules, "google.genai", old)
-    monkeypatch.setattr(sys.modules["google"], "genai", old, raising=False)
-    with pytest.raises(ValueError, match="too old for Gemini video"):
-        api.tools["gemini_generate_video"]("a duck", model="gemini-omni-1.2-flash", confirm_spend=True)
+    def refused(req, timeout=0):
+        import urllib.error
+
+        body = json.dumps({"error": {"message": "Model 'gemini-omni-9' not found."}}).encode()
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(graph_nodes.urllib.request, "urlopen", refused)
+    with pytest.raises(ValueError, match=r"Google refused it \(404\): Model 'gemini-omni-9' not found"):
+        api.tools["gemini_generate_video"]("a duck", model="gemini-omni-9", confirm_spend=True)
+    del sys, types
 
 
 def test_registers_gemini_media_generator(tmp_path, monkeypatch):

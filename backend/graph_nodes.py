@@ -281,19 +281,19 @@ def _find_video(node: Any) -> dict[str, Any]:
 def _omni_video(model: str, prompt: str, key: str, seconds: int, aspect_ratio: str) -> bytes:
     """One Gemini Omni clip through the Interactions API (Google's cookbook Get_started_Omni):
     the call returns when the clip is made, with the video in its steps."""
-    from google import genai
-
-    client = genai.Client(api_key=key)
-    if not hasattr(client, "interactions"):
-        raise ValueError("This Ducky's Google library is too old for Gemini video. Update UEFN Ducky.")
     fmt: dict[str, Any] = {"type": "video"}
     if aspect_ratio:
         fmt["aspect_ratio"] = str(aspect_ratio)
     if seconds:
         fmt["duration"] = f"{int(seconds)}s"  # Omni: "3s" to "15s"
-    interaction = client.interactions.create(model=model, input=prompt, response_format=fmt)
-    dump = getattr(interaction, "model_dump", None)
-    video = _find_video(dump(exclude_none=True) if callable(dump) else interaction)
+    # The web call itself, not the Google library: the copy bundled in Ducky answered 404
+    # "Model 'gemini-omni-1.2-flash' not found" for the request this call makes a clip from
+    # (Nov 11 2026, same key, same minute: 2.7 MB mp4 in steps[].content[]).
+    req = urllib.request.Request(f"{_API}/interactions?{urllib.parse.urlencode({'key': key})}",
+                                 data=json.dumps({"model": model, "input": prompt, "response_format": fmt}).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=900) as resp:
+        video = _find_video(json.loads(resp.read().decode("utf-8")))
     data = video.get("data")
     if isinstance(data, str):
         data = base64.b64decode(data)
