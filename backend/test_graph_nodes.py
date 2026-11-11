@@ -158,41 +158,165 @@ def test_the_plugin_gives_every_ducky_a_gemini_picture_tool(tmp_path, monkeypatc
 
     api = _ToolApi()
     graph_nodes.register_tools(api)
-    assert set(api.tools) == {"gemini_generate_image", "gemini_image_models"}
+    assert set(api.tools) == _TOOLS
     seen = {}
     monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
+    monkeypatch.setattr(graph_nodes, "image_models", lambda key: ["gemini-3-pro-image", "gemini-2.5-flash-image"])
     monkeypatch.setattr(graph_nodes, "_gemini_http", lambda model, body, key: seen.update(model=model, body=body)
                         or _picture("iVBORw=="))
     monkeypatch.setattr(graph_nodes, "_persist", lambda raw, **kw: {
         "path": str(tmp_path / "duck.png"), "media_url": "/generated/duck.png"})
     (tmp_path / "duck.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    out = api.tools["gemini_generate_image"]("a duck", model="gemini-3-pro-image")
+    make = api.tools["gemini_generate_image"]
+    out = make("a duck", model="gemini-3-pro-image", confirm_spend=True)
     info = json.loads(out[0] if isinstance(out, list) else out)
     assert info["media_url"] == "/generated/duck.png" and info["model"] == "gemini-3-pro-image"  # the chat card shows it
-    assert info["path"].endswith("duck.png") and info["cost"] == "Your own API key"
+    assert info["path"].endswith("duck.png") and info["made"] is True
     assert seen["model"] == "gemini-3-pro-image" and seen["body"]["contents"][0]["parts"] == [{"text": "a duck"}]
+    # Ducky's own picture tool and workflows call it with output_dir: plain JSON naming the file.
+    flow = make("a duck", model="auto", confirm_spend=True, wait=True, output_dir=str(tmp_path))
+    assert json.loads(flow)["downloaded"] == [str(tmp_path / "duck.png")] and seen["model"] == "gemini-2.5-flash-image"
     with pytest.raises(ValueError, match="what the picture shows"):
-        api.tools["gemini_generate_image"]("  ")
+        make("  ")
     assert api.visible["gemini_generate_image"]() is True
     monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "")
     assert api.visible["gemini_generate_image"]() is False  # no key: no ducky is offered it
     with pytest.raises(ValueError, match="Add a Google API key"):
-        api.tools["gemini_generate_image"]("a duck")
+        make("a duck")
 
     old = _ToolApi(takes_visible=False)  # a host from before visible=
     graph_nodes.register_tools(old)
-    assert set(old.tools) == {"gemini_generate_image", "gemini_image_models"}
+    assert set(old.tools) == _TOOLS
 
 
-def test_image_models_lists_only_picture_models(monkeypatch):
+_TOOLS = {"gemini_generate_image", "gemini_generate_video", "gemini_video_status", "gemini_image_models",
+          "gemini_video_models"}
+
+
+def test_nothing_is_made_or_billed_until_the_person_said_yes(monkeypatch):
+    """Pictures and video are billed to the person's key: a call without their yes answers
+    with what is available and what it costs, and reaches Google for nothing but the listing."""
+    from backend import graph_nodes
+
+    api = _ToolApi()
+    graph_nodes.register_tools(api)
+    spent = []
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
+    monkeypatch.setattr(graph_nodes, "image_models", lambda key: ["gemini-3-pro-image", "gemini-2.5-flash-image"])
+    monkeypatch.setattr(graph_nodes, "video_models", lambda key: ["veo-9-new", "veo-3.0-fast-generate-001"])
+    monkeypatch.setattr(graph_nodes, "handle_image", lambda ctx: spent.append("picture") or {"ok": False})
+    monkeypatch.setattr(graph_nodes, "_veo_start", lambda *a: spent.append("video") or "x")
+    for tool, kind, calls in (("gemini_generate_image", "picture", ({}, {"model": "gemini-3-pro-image"},
+                                                                    {"confirm_spend": True})),
+                              ("gemini_generate_video", "video", ({}, {"model": "veo-9-new"}, {"confirm_spend": True}))):
+        for kwargs in calls:  # no yes, a model but no yes, a yes but no model picked
+            answer = json.loads(api.tools[tool]("a duck", **kwargs))
+            assert answer["made"] is False and answer["billed"] is False
+            assert "ducky_ask_user" in answer["ask_the_person"] and "confirm_spend=true" in answer["ask_the_person"]
+            assert graph_nodes.PRICING_URL in answer["cost"] and len(answer["models"]) == 2, (tool, kind)
+    assert spent == []
+    picture = json.loads(api.tools["gemini_generate_image"]("a duck"))
+    assert picture["default"] == "gemini-2.5-flash-image"
+    assert {"id": "gemini-3-pro-image", "about": graph_nodes.MODEL_NOTES["gemini-3-pro-image"]} in picture["models"]
+    assert json.loads(api.tools["gemini_video_models"]())["default"] == "veo-3.0-fast-generate-001"
+    monkeypatch.setattr(graph_nodes, "video_models", lambda key: ["veo-9-new"])
+    assert json.loads(api.tools["gemini_video_models"]())["default"] == "veo-9-new"  # the usual one is not on this key
+    monkeypatch.setattr(graph_nodes, "video_models", lambda key: (_ for _ in ()).throw(OSError("offline")))
+    assert json.loads(api.tools["gemini_generate_video"]("a duck"))["models"] == [{"id": graph_nodes.VEO_DEFAULT}]
+
+
+def test_a_video_is_started_waited_for_and_kept_with_the_chat(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    import pytest
+
+    from backend import graph_nodes
+
+    api = _ToolApi()
+    graph_nodes.register_tools(api)
+    started, checks, saved = [], [], {}
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
+    monkeypatch.setattr(graph_nodes, "_veo_start", lambda model, prompt, key, image, seconds, ratio:
+                        started.append((model, prompt, seconds, ratio)) or f"models/{model}/operations/op1")
+    states = [{}, {"uri": "https://files/clip"}]
+    monkeypatch.setattr(graph_nodes, "_veo_check", lambda op, key: checks.append(op) or states.pop(0))
+    monkeypatch.setattr(graph_nodes, "_veo_download", lambda uri, key: b"MP4" + uri.encode())
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(graph_nodes, "_persist_video", lambda raw, **kw: saved.update(raw=raw, **kw) or {
+        "path": str(tmp_path / "clip.mp4"), "media_url": "/generated/clip.mp4"})
+
+    out = json.loads(api.tools["gemini_generate_video"]("a duck swims", model="veo-3.0-fast-generate-001",
+                                                        seconds=6, aspect_ratio="9:16", confirm_spend=True))
+    assert started == [("veo-3.0-fast-generate-001", "a duck swims", 6, "9:16")] and len(checks) == 2
+    assert out["made"] is True and out["media_url"] == "/generated/clip.mp4" and out["path"].endswith(".mp4")
+    assert saved["prompt"] == "a duck swims" and saved["raw"].startswith(b"MP4")
+
+    # Still being made when the wait ends: the operation goes back, and the status tool finishes it.
+    monkeypatch.setattr(graph_nodes, "VIDEO_WAIT_S", 0.0)
+    states[:] = [{}, {"uri": "https://files/clip2"}]
+    running = json.loads(api.tools["gemini_generate_video"]("a duck", model="auto", confirm_spend=True))
+    assert running["made"] is False and running["status"] == "running" and "/operations/" in running["operation"]
+    done = json.loads(api.tools["gemini_video_status"](running["operation"]))
+    assert done["made"] is True and done["model"] == "veo-3.0-fast-generate-001"
+    states[:] = [{"error": "blocked by safety filters"}]
+    with pytest.raises(ValueError, match="blocked by safety filters"):
+        api.tools["gemini_video_status"](running["operation"])
+    with pytest.raises(ValueError, match="Pass the operation"):
+        api.tools["gemini_video_status"]("nonsense")
+
+
+def test_veo_request_and_answer_shapes(monkeypatch):
+    """The Gemini API's Veo calls: predictLongRunning to start, the operation to poll."""
+    import io
+
+    from backend import graph_nodes
+
+    sent = {}
+
+    def fake(req, timeout=0):
+        url = req if isinstance(req, str) else req.full_url
+        if ":predictLongRunning" in url:
+            sent.update(url=url, body=json.loads(req.data))
+            return io.BytesIO(json.dumps({"name": "models/veo-x/operations/abc"}).encode())
+        return io.BytesIO(json.dumps(sent["poll"]).encode())
+
+    monkeypatch.setattr(graph_nodes.urllib.request, "urlopen", fake)
+    assert graph_nodes._veo_start("veo-x", "a duck", "K", None, 0, "") == "models/veo-x/operations/abc"
+    assert "/models/veo-x:predictLongRunning?key=K" in sent["url"]
+    assert sent["body"] == {"instances": [{"prompt": "a duck"}]}  # the model's own defaults when nothing is asked
+    graph_nodes._veo_start("veo-x", "a duck", "K", None, 6, "9:16")
+    assert sent["body"]["parameters"] == {"durationSeconds": 6, "aspectRatio": "9:16"}
+    sent["poll"] = {"done": False}
+    assert graph_nodes._veo_check("models/veo-x/operations/abc", "K") == {}
+    sent["poll"] = {"done": True, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": "U"}}]}}}
+    assert graph_nodes._veo_check("models/veo-x/operations/abc", "K") == {"uri": "U"}
+    sent["poll"] = {"done": True, "error": {"message": "quota"}}
+    assert graph_nodes._veo_check("models/veo-x/operations/abc", "K") == {"error": "quota"}
+    sent["poll"] = {"done": True, "response": {"generateVideoResponse": {"raiMediaFilteredReasons": ["unsafe"]}}}
+    assert graph_nodes._veo_check("models/veo-x/operations/abc", "K") == {"error": "unsafe"}
+
+
+def test_the_picture_maker_is_declared_so_duckys_own_picture_tool_asks_first():
+    """contributes.automations.image_generators with paid: Ducky's ducky_generate_image names
+    the maker and its cost and waits for the person's yes before it passes confirm_spend."""
+    data = json.loads((Path(__file__).resolve().parent.parent / "plugin.json").read_text(encoding="utf-8"))
+    row = data["contributes"]["automations"]["image_generators"][0]
+    assert row["tool"] == "gemini_generate_image" and row["paid"] is True and row["args"] == {"model": "auto"}
+    assert row["image_arg"] == "image" and "Google API key" in row["cost"]
+
+
+def test_model_listings_keep_only_their_kind_and_drop_preview_twins(monkeypatch):
     import io
 
     from backend import graph_nodes
 
     body = json.dumps({"models": [{"name": "models/gemini-3.8-flash"}, {"name": "models/gemini-2.5-flash-image"},
-                                  {"name": "models/gemini-3-pro-image"}]}).encode()
+                                  {"name": "models/gemini-3-pro-image"}, {"name": "models/gemini-3-pro-image-preview"},
+                                  {"name": "models/veo-3.0-fast-generate-001"}, {"name": "models/veo-3.1-generate-preview"}]}).encode()
     monkeypatch.setattr(graph_nodes.urllib.request, "urlopen", lambda url, timeout=0: io.BytesIO(body))
     assert graph_nodes.image_models("k") == ["gemini-3-pro-image", "gemini-2.5-flash-image"]
+    assert graph_nodes.video_models("k") == ["veo-3.1-generate-preview", "veo-3.0-fast-generate-001"]
 
 
 def test_registers_gemini_media_generator(tmp_path, monkeypatch):

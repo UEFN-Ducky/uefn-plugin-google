@@ -178,48 +178,206 @@ def generate_image(prompt: str, **options: Any) -> dict[str, Any]:
     return {"path": out["path"], "mime": "image/png"}
 
 
-IMAGE_INTENT = r"\b(gemini|google|imagen|nano[- ]?banana|image|picture|draw|illustration|concept art)\b"
+MEDIA_INTENT = (r"\b(gemini|google|imagen|veo|nano[- ]?banana|image|picture|draw|illustration|concept art"
+                r"|video|clip|animation|trailer)\b")
+PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
+VEO_DEFAULT = "veo-3.0-fast-generate-001"
+# What to tell the person about each model when asking which to use. A model not here is listed plain.
+MODEL_NOTES = {
+    "gemini-2.5-flash-image": "fast, the lowest price (Nano Banana)",
+    "gemini-3.1-flash-lite-image": "the lightest and quickest",
+    "gemini-3.1-flash-image": "newer, fast, better with text in the picture",
+    "gemini-3-pro-image": "the best quality, slower, the highest price",
+}
+VIDEO_WAIT_S = 300.0  # one tool call waits this long; gemini_video_status picks a longer one up
+_API = "https://generativelanguage.googleapis.com/v1beta"
+
+
+def _listed(key: str, word: str) -> list[str]:
+    """Model ids this key lists whose name has ``word``, newest first (one free listing). A
+    "-preview" twin of a released model is left out."""
+    q = urllib.parse.urlencode({"key": key, "pageSize": 1000})
+    with urllib.request.urlopen(f"{_API}/models?{q}", timeout=30) as resp:
+        rows = json.loads(resp.read().decode("utf-8")).get("models") or []
+    ids = {str(row.get("name") or "").replace("models/", "") for row in rows if isinstance(row, dict)}
+    return sorted((i for i in ids if word in i and not (i.endswith("-preview") and i[:-8] in ids)), reverse=True)
 
 
 def image_models(key: str) -> list[str]:
-    """The image models this key may use, newest names first (one free listing)."""
-    q = urllib.parse.urlencode({"key": key, "pageSize": 1000})
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?{q}"
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        rows = json.loads(resp.read().decode("utf-8")).get("models") or []
-    ids = [str(row.get("name") or "").replace("models/", "") for row in rows if isinstance(row, dict)]
-    return sorted((i for i in ids if "image" in i), reverse=True)
+    return _listed(key, "image")
+
+
+def video_models(key: str) -> list[str]:
+    return _listed(key, "veo")
+
+
+def _choices(key: str, kind: str) -> list[dict[str, str]]:
+    """What the person can pick from, with a few words on each. A listing that fails still
+    offers the models known to work."""
+    try:
+        ids = image_models(key) if kind == "picture" else video_models(key)
+    except (OSError, ValueError):
+        ids = []
+    ids = ids or (list(IMAGE_FALLBACKS) if kind == "picture" else [VEO_DEFAULT])
+    return [{"id": i, **({"about": MODEL_NOTES[i]} if i in MODEL_NOTES else {})} for i in ids]
+
+
+def _default(models: list[dict[str, str]], kind: str) -> str:
+    """The model "auto" means: the usual one when this key lists it, else the first it lists."""
+    usual = GEMINI_IMAGE if kind == "picture" else VEO_DEFAULT
+    ids = [row["id"] for row in models]
+    return usual if usual in ids or not ids else ids[0]
+
+
+def ask_first(key: str, kind: str, tool: str) -> str:
+    """The answer to a call the person has not agreed to yet: nothing was made, nothing was
+    billed. It names what is available and what it costs, for the ducky to ask the person."""
+    models = _choices(key, kind)
+    billed = ("Google bills each picture to the person's own Google API key (a free-tier key has a daily allowance)."
+              if kind == "picture" else
+              "Google bills video per second of footage to the person's own Google API key; Veo needs a paid key "
+              "and one clip can cost a few dollars.")
+    return json.dumps({
+        "made": False,
+        "billed": False,
+        "ask_the_person": (f"Nothing was made yet. Ask the person with ducky_ask_user before making this {kind}: "
+                           f"which model to use (offer the ones in models, with their notes), and that they agree "
+                           f"to the cost. Then call {tool} again with model=<their pick> and confirm_spend=true. "
+                           f"Never set confirm_spend=true without their yes for this {kind}."),
+        "models": models,
+        "default": _default(models, kind),
+        "cost": f"{billed} Prices: {PRICING_URL}",
+    })
+
+
+def _veo_start(model: str, prompt: str, key: str, image: Path | None, seconds: int, aspect_ratio: str) -> str:
+    """Start one Veo clip; returns the operation's name (Google makes it in the background)."""
+    instance: dict[str, Any] = {"prompt": prompt}
+    if image:
+        mime = mimetypes.guess_type(image.name)[0] or "image/png"
+        instance["image"] = {"bytesBase64Encoded": base64.b64encode(image.read_bytes()).decode(), "mimeType": mime}
+    params = {k: v for k, v in (("durationSeconds", int(seconds or 0)), ("aspectRatio", str(aspect_ratio or ""))) if v}
+    body = {"instances": [instance], **({"parameters": params} if params else {})}
+    req = urllib.request.Request(f"{_API}/models/{model}:predictLongRunning?{urllib.parse.urlencode({'key': key})}",
+                                 data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"},
+                                 method="POST")
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        name = str(json.loads(resp.read().decode("utf-8")).get("name") or "")
+    if not name:
+        raise ValueError("Google did not start the video.")
+    return name
+
+
+def _veo_check(operation: str, key: str) -> dict[str, Any]:
+    """{} while Google is still making it, else {"uri"} or {"error"}."""
+    with urllib.request.urlopen(f"{_API}/{operation}?{urllib.parse.urlencode({'key': key})}", timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if not data.get("done"):
+        return {}
+    if data.get("error"):
+        return {"error": str((data["error"] or {}).get("message") or "Google could not make the video.")}
+    made = ((data.get("response") or {}).get("generateVideoResponse") or {})
+    for sample in made.get("generatedSamples") or []:
+        uri = str(((sample or {}).get("video") or {}).get("uri") or "")
+        if uri:
+            return {"uri": uri}
+    reasons = "; ".join(str(r) for r in made.get("raiMediaFilteredReasons") or [])
+    return {"error": reasons or "Google finished without a video. Try wording the prompt differently."}
+
+
+def _veo_download(uri: str, key: str) -> bytes:
+    req = urllib.request.Request(uri, headers={"x-goog-api-key": key})
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        return resp.read()
+
+
+def _persist_video(raw: bytes, *, prompt: str, model: str) -> dict[str, Any]:
+    """Keep the clip with the chat that asked (Ducky's generated media folder)."""
+    import time
+
+    from frontend.ui_web import generated_images as gen
+
+    try:
+        chat = gen._chat_of_caller()
+    except Exception:
+        chat = ""
+    return gen.save_generated_image(raw, prompt=prompt, gateway="google", model=model,
+                                    filename=f"veo_{int(time.time())}.mp4", mime="video/mp4", conv_id=chat)
+
+
+def _video_answer(operation: str, key: str, prompt: str, model: str, wait_s: float) -> str:
+    """Wait for the clip up to ``wait_s``, keep it with the chat, and say where it is; a clip
+    still being made answers with its operation for gemini_video_status."""
+    import time
+
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
+        state = _veo_check(operation, key)
+        if state or time.monotonic() >= deadline:
+            break
+        time.sleep(8)
+    if not state:
+        return json.dumps({"made": False, "status": "running", "operation": operation,
+                           "next": "Google is still making it. Call gemini_video_status with this operation in a minute."})
+    if state.get("error"):
+        raise ValueError(f"Google made no video: {state['error']}")
+    saved = _persist_video(_veo_download(state["uri"], key), prompt=prompt, model=model)
+    path = str(saved.get("path") or "")
+    return json.dumps({"ok": True, "made": True, "path": path.replace("\\", "/"), "downloaded": [path],
+                       "media_url": str(saved.get("media_url") or ""), "model": model, "maker": "Google Veo"})
 
 
 def register_tools(api: Any) -> None:
-    """Gemini's pictures as tools every ducky can call: the plugin's own, so no agent has to
-    script around it and the picture shows in the chat like any other maker's."""
+    """Gemini's pictures and Veo's videos as tools every ducky can call. Each one costs the
+    person money on their own Google key, so each refuses to run until the person has been
+    told what is available and what it costs and has said yes (confirm_spend)."""
 
     def has_key() -> bool:  # from disk, never the network: it runs on every tool listing
         return bool(_secret("gemini"))
 
     def tool(name: str) -> Any:
         try:
-            return api.tool(name=name, intent=IMAGE_INTENT, visible=has_key)
+            return api.tool(name=name, intent=MEDIA_INTENT, visible=has_key)
         except TypeError:  # a host from before visible=
-            return api.tool(name=name, intent=IMAGE_INTENT)
+            return api.tool(name=name, intent=MEDIA_INTENT)
+
+    def key_or_raise() -> str:
+        key = _secret("gemini")
+        if not key:
+            raise ValueError("Add a Google API key in Settings → LLMs → Google first.")
+        return key
+
+    def refused(exc: Exception) -> ValueError:
+        if isinstance(exc, urllib.error.HTTPError):
+            return ValueError(_google_reason(exc).replace("the picture", "it"))
+        return ValueError(f"Could not reach Google: {exc}")
 
     @tool("gemini_generate_image")
-    def gemini_generate_image(prompt: str, model: str = "", image: str = "") -> Any:
-        """Make a picture with Google Gemini and show it in this chat. Runs on the person's own
-        Google API key (Settings > LLMs > Google): asking for the picture is the yes, no credits.
-        prompt: what the picture shows. image: path of a reference picture to edit or restyle
-        (optional). model: a Gemini image model (optional; gemini_image_models lists them; the
-        default is gemini-2.5-flash-image). Returns the picture, so you see it, and its path."""
+    def gemini_generate_image(prompt: str, model: str = "", image: str = "", confirm_spend: bool = False,
+                              wait: bool = True, output_dir: str = "") -> Any:
+        """Make a picture with Google Gemini and show it in this chat. It is billed to the
+        person's own Google API key, so ASK FIRST: call it with just the prompt and it answers
+        with the models available and the cost, and makes nothing. Ask the person which model
+        and whether they agree (ducky_ask_user), then call again with model=<their pick> and
+        confirm_spend=true. prompt: what the picture shows. image: path of a reference picture
+        to edit or restyle (optional). model="auto" is the default model. Returns the picture."""
+        _ = wait
         text = str(prompt or "").strip()
         if not text:
             raise ValueError("Say what the picture shows (prompt).")
-        out = handle_image({"config": {"prompt": text, "model": str(model or "").strip(),
+        key = key_or_raise()
+        picked = str(model or "").strip()
+        if not confirm_spend or not picked:
+            return ask_first(key, "picture", "gemini_generate_image")
+        out = handle_image({"config": {"prompt": text, "model": "" if picked.lower() in ("auto", "default") else picked,
                                        "image": str(image or "").strip()}, "payload": {}})
         if not out.get("ok"):
             raise ValueError(str(out.get("error") or "Google made no picture."))
-        info = json.dumps({"path": str(out["path"]).replace("\\", "/"), "media_url": out.get("media_url") or "",
-                           "model": out.get("model") or "", "maker": "Google Gemini", "cost": "Your own API key"})
+        info = json.dumps({"ok": True, "made": True, "path": str(out["path"]).replace("\\", "/"),
+                           "downloaded": [str(out["path"])], "media_url": out.get("media_url") or "",
+                           "model": out.get("model") or "", "maker": "Google Gemini"})
+        if output_dir:  # a workflow or Ducky's own picture tool called: it reads the JSON
+            return info
         try:
             from backend.tools.core.model_picture import model_picture
 
@@ -227,18 +385,61 @@ def register_tools(api: Any) -> None:
         except Exception:  # an older host: the card still shows the picture from media_url
             return info
 
+    @tool("gemini_generate_video")
+    def gemini_generate_video(prompt: str, model: str = "", image: str = "", seconds: int = 0,
+                              aspect_ratio: str = "", confirm_spend: bool = False) -> str:
+        """Make a short video with Google Veo and show it in this chat. Veo is billed per second
+        of footage to the person's own Google API key and needs a paid key, so ASK FIRST: call
+        it with just the prompt and it answers with the models available and the cost, and
+        makes nothing. Ask the person which model and whether they agree (ducky_ask_user), then
+        call again with model=<their pick> and confirm_spend=true. image: path of a picture the
+        video starts from (optional). seconds / aspect_ratio ("16:9", "9:16"): optional, the
+        model's own defaults when left out. Takes a few minutes; a clip still being made answers
+        with an operation for gemini_video_status."""
+        text = str(prompt or "").strip()
+        if not text:
+            raise ValueError("Say what the video shows (prompt).")
+        key = key_or_raise()
+        picked = str(model or "").strip()
+        if not confirm_spend or not picked:
+            return ask_first(key, "video", "gemini_generate_video")
+        start = _image_path(image)
+        if start and not Path(start).is_file():
+            raise ValueError(f"reference picture not found: {start}")
+        if picked.lower() in ("auto", "default"):
+            picked = _default(_choices(key, "video"), "video")
+        try:
+            operation = _veo_start(picked, text, key, Path(start) if start else None, seconds, aspect_ratio)
+            return _video_answer(operation, key, text, picked, VIDEO_WAIT_S)
+        except (urllib.error.HTTPError, OSError) as exc:
+            raise refused(exc) from exc
+
+    @tool("gemini_video_status")
+    def gemini_video_status(operation: str, wait: bool = True) -> str:
+        """Check a video gemini_generate_video is still making (free: the clip was already
+        agreed and started). Keeps the finished clip with this chat and returns its path."""
+        name = str(operation or "").strip()
+        if "/operations/" not in name:
+            raise ValueError("Pass the operation gemini_generate_video returned.")
+        key = key_or_raise()
+        model = name.split("/operations/")[0].replace("models/", "")
+        try:
+            return _video_answer(name, key, "", model, VIDEO_WAIT_S if wait else 0.0)
+        except (urllib.error.HTTPError, OSError) as exc:
+            raise refused(exc) from exc
+
     @tool("gemini_image_models")
     def gemini_image_models() -> str:
-        """List the Gemini image models the person's Google API key can use (free, no picture made)."""
-        key = _secret("gemini")
-        if not key:
-            raise ValueError("Add a Google API key in Settings → LLMs → Google to make pictures.")
-        try:
-            return json.dumps({"default": GEMINI_IMAGE, "models": image_models(key)})
-        except urllib.error.HTTPError as exc:
-            raise ValueError(_google_reason(exc)) from exc
-        except OSError as exc:
-            raise ValueError(f"Could not reach Google: {exc}") from exc
+        """List the Gemini image models the person's Google API key can use, with a few words
+        on each (free, nothing is made)."""
+        models = _choices(key_or_raise(), "picture")
+        return json.dumps({"default": _default(models, "picture"), "models": models})
+
+    @tool("gemini_video_models")
+    def gemini_video_models() -> str:
+        """List the Veo video models the person's Google API key can use (free, nothing is made)."""
+        models = _choices(key_or_raise(), "video")
+        return json.dumps({"default": _default(models, "video"), "models": models})
 
 
 def register_nodes(api: Any) -> None:

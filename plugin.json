@@ -1,9 +1,9 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.52",
+  "version": "1.0.53",
   "label": "Google",
-  "description": "Google Gemini API key and Gemini CLI coding agent. After Install, Google appears under Settings \u2192 LLMs \u2192 Providers & Keys, and Gemini CLI under Coding Agents.",
+  "description": "Google Gemini for chats, pictures and video. Adds Google under Settings → LLMs → Providers & Keys, the Gemini CLI coding agent, Gemini picture and Veo video tools for every ducky (they ask before spending on your key), and Google workflow nodes.",
   "min_app_version": "1.2.45",
   "default_enabled": true,
   "data_sharing": false,
@@ -100,6 +100,45 @@
       ]
     },
     "automations": {
+      "image_generators": [
+        {
+          "id": "gemini_image",
+          "label": "Google · Gemini image",
+          "tool": "gemini_generate_image",
+          "credits": 0,
+          "paid": true,
+          "cost": "Billed to your own Google API key",
+          "args": {
+            "model": "auto"
+          },
+          "image_arg": "image",
+          "config_fields": [
+            {
+              "id": "model",
+              "label": "Model",
+              "type": "select",
+              "options": [
+                {
+                  "id": "auto",
+                  "label": "Auto (gemini-2.5-flash-image)"
+                },
+                {
+                  "id": "gemini-2.5-flash-image",
+                  "label": "gemini-2.5-flash-image (fast, lowest price)"
+                },
+                {
+                  "id": "gemini-3.1-flash-image",
+                  "label": "gemini-3.1-flash-image (newer, fast)"
+                },
+                {
+                  "id": "gemini-3-pro-image",
+                  "label": "gemini-3-pro-image (best quality)"
+                }
+              ]
+            }
+          ]
+        }
+      ],
       "nodes": [
         {
           "id": "google.complete",
