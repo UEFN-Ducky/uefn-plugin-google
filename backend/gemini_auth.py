@@ -24,11 +24,14 @@ ACCESS_FILE = "ducky_access.json"  # in the account's .gemini folder
 NO_ACCESS = "No Gemini access: Google no longer allows personal accounts in Gemini CLI. Add a free API key above."
 NOT_FINISHED = "Sign-in didn't finish, try again."
 WAITING = "Waiting for Google sign-in in your browser…"
-NOT_INSTALLED = "Gemini CLI isn't installed yet. Ducky is installing it now; press Log in again in a minute."
+NOT_INSTALLED = "Gemini CLI isn't installed yet. Ducky is installing it; sign-in starts by itself."
 
 # ponytail: one sign-in per account folder, in this process; a second Log in replaces it.
 _LOCK = threading.Lock()
 _STATE: dict[str, dict[str, Any]] = {}  # .gemini folder -> {proc, pending, error}
+# Log in's install of a missing CLI. The row reads Installing while it runs and the app starts
+# the sign-in by itself when it ends (one click); it used to say "press Log in again in a minute".
+_INSTALL: dict[str, Any] = {"busy": False, "error": ""}
 
 
 def _key(dot: Path) -> str:
@@ -46,10 +49,29 @@ def login_state(dot: Path) -> dict[str, Any]:
     return {"error": st["error"]} if st["error"] else {}
 
 
+def install_state() -> dict[str, Any]:
+    """``{pending, installing}`` while Log in's install runs, ``{error}`` after it failed, else ``{}``."""
+    if _INSTALL["busy"]:
+        return {"pending": True, "installing": True}
+    return {"error": _INSTALL["error"]} if _INSTALL["error"] else {}
+
+
 def _install_in_background() -> None:
     from .cli_update import update_cli
 
-    threading.Thread(target=update_cli, name="gemini-cli-install", daemon=True).start()
+    def run() -> None:
+        try:
+            res = update_cli() or {}
+            _INSTALL["error"] = "" if res.get("ok") else f"Gemini CLI install failed: {str(res.get('error') or 'no reason given')[:300]}"
+        except Exception as exc:  # never leave the row on Installing
+            _INSTALL["error"] = f"Gemini CLI install failed: {exc}"
+        finally:
+            _INSTALL["busy"] = False
+
+    if _INSTALL["busy"]:
+        return
+    _INSTALL.update(busy=True, error="")  # before the thread: the row's first status sees it
+    threading.Thread(target=run, name="gemini-cli-install", daemon=True).start()
 
 
 def _stop(proc: Any) -> None:
@@ -100,6 +122,7 @@ def start_browser_login(
     if not binary:
         _install_in_background()
         return {"error": NOT_INSTALLED}
+    _INSTALL["error"] = ""  # it is installed now: an older failed install says nothing about this sign-in
     dot = _dot_gemini(config_dir)
     dot.mkdir(parents=True, exist_ok=True)
     clear_access(dot)  # a new sign-in: what Google says about it comes from this run

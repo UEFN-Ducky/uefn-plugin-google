@@ -149,6 +149,43 @@ def test_missing_cli_says_so_and_installs(monkeypatch, tmp_path):
     assert started == [1]
 
 
+def test_log_in_with_no_cli_reads_installing_until_the_install_ends(monkeypatch, tmp_path):
+    """One click: the row says Installing while Log in's install runs, so the app waits and
+    starts the sign-in by itself. A failed install says why; a later sign-in drops that."""
+    import threading
+
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
+    monkeypatch.setattr(gemini_auth, "ACCESS_CHECK_S", 0.0)
+    gemini_auth._STATE.clear()
+    monkeypatch.setitem(gemini_auth._INSTALL, "busy", False)
+    monkeypatch.setitem(gemini_auth._INSTALL, "error", "")
+    installed, release, result = [], threading.Event(), {"ok": False, "error": "npm not found"}
+
+    def fake_update(_o: str = ""):
+        installed.append(1)
+        release.wait(5)
+        return result
+
+    monkeypatch.setattr(cli_update, "update_cli", fake_update)
+    monkeypatch.setattr(cli_update, "resolve_bin", lambda _o="": "")
+    assert gemini_auth.start_browser_login(None, popen=None) == {"error": gemini_auth.NOT_INSTALLED}
+    assert account_status(None) == {"loggedIn": False, "pending": True, "installing": True}
+    assert gemini_auth.start_browser_login(None, popen=None) == {"error": gemini_auth.NOT_INSTALLED}
+    release.set()
+    deadline = time.monotonic() + 3
+    while gemini_auth._INSTALL["busy"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert installed == [1], "a second Log in while it installs starts no second install"
+    assert account_status(None) == {"loggedIn": False, "error": "Gemini CLI install failed: npm not found"}
+    # Installed after all: the sign-in starts and the old install error is gone.
+    monkeypatch.setattr(cli_update, "resolve_bin", lambda _o="": "gemini.cmd")
+    fake = FakeCli(tmp_path, writes=False)
+    (tmp_path / ".gemini").mkdir(exist_ok=True)
+    assert "message" in gemini_auth.start_browser_login(None, popen=fake, timeout_s=5, poll_s=0.01)
+    assert account_status(None) == {"loggedIn": False, "pending": True}
+    fake.kill()
+
+
 ENOENT = (
     "Failed to parse default sandbox policy: Error: ENOENT: no such file or directory, open "
     "'C:\\npm\\node_modules\\@google\\gemini-cli\\bundle\\policies\\sandbox-default.toml'\n"

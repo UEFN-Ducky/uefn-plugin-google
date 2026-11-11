@@ -100,9 +100,12 @@ def account_status(config_dir: str | None) -> dict[str, Any]:
     except Exception:
         pass
     if not status["loggedIn"]:
-        from .gemini_auth import login_state
+        from .gemini_auth import install_state, login_state
 
-        status.update(login_state(folder))  # pending / error of a browser sign-in
+        # Log in's install of a missing CLI first (the app waits for it, then signs in by
+        # itself), else the pending / error of a browser sign-in, else why the install failed.
+        install = install_state()
+        status.update(install if install.get("installing") else login_state(folder) or install)
         return status
     from .gemini_auth import read_access
 
