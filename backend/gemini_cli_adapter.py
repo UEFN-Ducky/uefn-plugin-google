@@ -244,14 +244,20 @@ def run_env(env: dict[str, str], key: str, *, auto_approve: bool) -> dict[str, s
 #: The longest message kept on the command line; Windows' limit is 32,767 for the whole line.
 ARG_PROMPT_MAX = 4000
 LONG_PROMPT_ARG = "Do what the message above asks."
+# One line of plain ASCII words and punctuation: the only text that survives cmd.exe unchanged.
+_PLAIN_ARG_RE = re.compile(r"[\w .,:;?!'()/+=@#-]{1,%d}" % ARG_PROMPT_MAX, re.ASCII)
 
 
 def split_gemini_prompt(system_prompt: str, prompt: str) -> tuple[str, str]:
     """(``-p`` text, stdin text). ``gemini -p X`` with piped stdin S answers "S\\n\\nX", so the
     system prompt rides stdin and the message stays the question; a long message goes too."""
     system = (system_prompt or "").strip()
-    if len(prompt) <= ARG_PROMPT_MAX:
+    if _PLAIN_ARG_RE.fullmatch(prompt):
         return prompt, system  # "" still closes stdin: the CLI never waits on an open pipe
+    # Anything else goes in on stdin. On Windows the CLI is a .cmd launcher and cmd.exe cuts
+    # an argument at its first line break (and rewrites quotes, % and ^): a message of more
+    # than one line reached the CLI as its first line only, and the turn ended "ok" with no
+    # reply. Every message from a Ducky chat is several lines (the notes Ducky puts first).
     return LONG_PROMPT_ARG, (system + "\n\n" + prompt) if system else prompt
 
 

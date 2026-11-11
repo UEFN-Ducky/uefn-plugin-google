@@ -254,6 +254,13 @@ def test_system_prompt_rides_stdin_and_the_message_stays_the_question() -> None:
     assert split_gemini_prompt("", "hey") == ("hey", "")  # stdin still closes
     long_msg = "x" * (ARG_PROMPT_MAX + 1)
     assert split_gemini_prompt("rules", long_msg) == (LONG_PROMPT_ARG, "rules\n\n" + long_msg)
+    # Seen live through gemini.CMD: a two-line message ended "ok" with an empty reply, because
+    # cmd.exe cuts an argument at its first line break. Every Ducky chat message is several lines.
+    for msg in ("[ducky:permissions] Allow everything.\n\nSay PELICAN.", 'say "hi"', "100% done", "a & b | c > d",
+                "café au lait", "x ^ y"):
+        assert split_gemini_prompt("rules", msg) == (LONG_PROMPT_ARG, "rules\n\n" + msg), msg
+        assert split_gemini_prompt("", msg) == (LONG_PROMPT_ARG, msg), msg  # a resumed turn: no system prompt
+    assert split_gemini_prompt("rules", "What's in my level? (test222)") == ("What's in my level? (test222)", "rules")
 
 
 def test_run_env_signs_in_with_google_and_trusts_the_folder() -> None:
