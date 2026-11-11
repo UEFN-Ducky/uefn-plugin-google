@@ -203,7 +203,8 @@ def test_nothing_is_made_or_billed_until_the_person_said_yes(monkeypatch):
     spent = []
     monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
     monkeypatch.setattr(graph_nodes, "image_models", lambda key: ["gemini-3-pro-image", "gemini-2.5-flash-image"])
-    monkeypatch.setattr(graph_nodes, "video_models", lambda key: ["veo-9-new", "veo-3.0-fast-generate-001"])
+    monkeypatch.setattr(graph_nodes, "video_models", lambda key: ["veo-9-new", "gemini-omni-1.2-flash"])
+    monkeypatch.setattr(graph_nodes, "_omni_video", lambda *a: spent.append("video") or b"")
     monkeypatch.setattr(graph_nodes, "handle_image", lambda ctx: spent.append("picture") or {"ok": False})
     monkeypatch.setattr(graph_nodes, "_veo_start", lambda *a: spent.append("video") or "x")
     for tool, kind, calls in (("gemini_generate_image", "picture", ({}, {"model": "gemini-3-pro-image"},
@@ -218,11 +219,17 @@ def test_nothing_is_made_or_billed_until_the_person_said_yes(monkeypatch):
     picture = json.loads(api.tools["gemini_generate_image"]("a duck"))
     assert picture["default"] == "gemini-2.5-flash-image"
     assert {"id": "gemini-3-pro-image", "about": graph_nodes.MODEL_NOTES["gemini-3-pro-image"]} in picture["models"]
-    assert json.loads(api.tools["gemini_video_models"]())["default"] == "veo-3.0-fast-generate-001"
+    assert json.loads(api.tools["gemini_video_models"]())["default"] == "gemini-omni-1.2-flash"
     monkeypatch.setattr(graph_nodes, "video_models", lambda key: ["veo-9-new"])
     assert json.loads(api.tools["gemini_video_models"]())["default"] == "veo-9-new"  # the usual one is not on this key
     monkeypatch.setattr(graph_nodes, "video_models", lambda key: (_ for _ in ()).throw(OSError("offline")))
-    assert json.loads(api.tools["gemini_generate_video"]("a duck"))["models"] == [{"id": graph_nodes.VEO_DEFAULT}]
+    # A key that lists no video model (or a listing that failed) is told so: no guessed name is
+    # ever offered as available (the first version offered a Veo name Google answered 404 to).
+    for kwargs in ({}, {"model": "auto", "confirm_spend": True}):
+        none = json.loads(api.tools["gemini_generate_video"]("a duck", **kwargs))
+        assert none["models"] == [] and none["made"] is False and "lists no video models" in none["tell_the_person"]
+    assert json.loads(api.tools["gemini_video_models"]()) == {"default": "", "models": []}
+    assert spent == []
 
 
 def test_a_video_is_started_waited_for_and_kept_with_the_chat(tmp_path, monkeypatch):
@@ -242,6 +249,7 @@ def test_a_video_is_started_waited_for_and_kept_with_the_chat(tmp_path, monkeypa
     states = [{}, {"uri": "https://files/clip"}]
     monkeypatch.setattr(graph_nodes, "_veo_check", lambda op, key: checks.append(op) or states.pop(0))
     monkeypatch.setattr(graph_nodes, "_veo_download", lambda uri, key: b"MP4" + uri.encode())
+    monkeypatch.setattr(graph_nodes, "video_models", lambda key: ["veo-3.0-fast-generate-001"])
     monkeypatch.setattr("time.sleep", lambda _s: None)
     monkeypatch.setattr(graph_nodes, "_persist_video", lambda raw, **kw: saved.update(raw=raw, **kw) or {
         "path": str(tmp_path / "clip.mp4"), "media_url": "/generated/clip.mp4"})
@@ -313,10 +321,59 @@ def test_model_listings_keep_only_their_kind_and_drop_preview_twins(monkeypatch)
 
     body = json.dumps({"models": [{"name": "models/gemini-3.8-flash"}, {"name": "models/gemini-2.5-flash-image"},
                                   {"name": "models/gemini-3-pro-image"}, {"name": "models/gemini-3-pro-image-preview"},
-                                  {"name": "models/veo-3.0-fast-generate-001"}, {"name": "models/veo-3.1-generate-preview"}]}).encode()
+                                  {"name": "models/veo-3.0-fast-generate-001"}, {"name": "models/veo-3.1-generate-preview"},
+                                  {"name": "models/gemini-omni-1.2-flash"}]}).encode()
     monkeypatch.setattr(graph_nodes.urllib.request, "urlopen", lambda url, timeout=0: io.BytesIO(body))
     assert graph_nodes.image_models("k") == ["gemini-3-pro-image", "gemini-2.5-flash-image"]
-    assert graph_nodes.video_models("k") == ["veo-3.1-generate-preview", "veo-3.0-fast-generate-001"]
+    assert graph_nodes.video_models("k") == ["veo-3.1-generate-preview", "veo-3.0-fast-generate-001",
+                                             "gemini-omni-1.2-flash"]
+
+
+def test_gemini_omni_video_goes_through_the_interactions_api(tmp_path, monkeypatch):
+    """Nov 11 2026: a real key listed no Veo model, only gemini-omni ones. Google's cookbook:
+    client.interactions.create(model, input, response_format={"type": "video", ...})."""
+    import base64
+    import sys
+    import types
+
+    import pytest
+
+    from backend import graph_nodes
+
+    asked = {}
+
+    class Interactions:
+        def create(self, **kw):
+            asked.update(kw)
+            return types.SimpleNamespace(model_dump=lambda exclude_none=True: {"steps": [
+                {"type": "thought", "summary": "planning"},
+                {"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4",
+                                                      "data": base64.b64encode(b"MP4DATA").decode()}]}]})
+
+    fake = types.SimpleNamespace(Client=lambda api_key: types.SimpleNamespace(interactions=Interactions()))
+    monkeypatch.setattr(sys.modules["google"], "genai", fake, raising=False)
+    monkeypatch.setitem(sys.modules, "google.genai", fake)
+    assert graph_nodes._omni_video("gemini-omni-1.2-flash", "a duck", "K", 6, "9:16") == b"MP4DATA"
+    assert asked == {"model": "gemini-omni-1.2-flash", "input": "a duck",
+                     "response_format": {"type": "video", "aspect_ratio": "9:16", "duration": "6s"}}
+    graph_nodes._omni_video("gemini-omni-1.2-flash", "a duck", "K", 0, "")
+    assert asked["response_format"] == {"type": "video"}  # the model's own defaults
+
+    api = _ToolApi()
+    graph_nodes.register_tools(api)
+    saved = {}
+    monkeypatch.setattr(graph_nodes, "_secret", lambda *_a: "g-test")
+    monkeypatch.setattr(graph_nodes, "_persist_video", lambda raw, **kw: saved.update(raw=raw, **kw) or {
+        "path": str(tmp_path / "clip.mp4"), "media_url": "/generated/clip.mp4"})
+    out = json.loads(api.tools["gemini_generate_video"]("a duck", model="gemini-omni-1.2-flash", confirm_spend=True))
+    assert out["made"] is True and out["media_url"] == "/generated/clip.mp4" and out["maker"] == "Google Gemini Omni"
+    assert saved["raw"] == b"MP4DATA" and saved["model"] == "gemini-omni-1.2-flash"
+
+    old = types.SimpleNamespace(Client=lambda api_key: types.SimpleNamespace())  # a library before interactions
+    monkeypatch.setitem(sys.modules, "google.genai", old)
+    monkeypatch.setattr(sys.modules["google"], "genai", old, raising=False)
+    with pytest.raises(ValueError, match="too old for Gemini video"):
+        api.tools["gemini_generate_video"]("a duck", model="gemini-omni-1.2-flash", confirm_spend=True)
 
 
 def test_registers_gemini_media_generator(tmp_path, monkeypatch):

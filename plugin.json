@@ -1,7 +1,7 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.53",
+  "version": "1.0.54",
   "label": "Google",
   "description": "Google Gemini for chats, pictures and video. Adds Google under Settings → LLMs → Providers & Keys, the Gemini CLI coding agent, Gemini picture and Veo video tools for every ducky (they ask before spending on your key), and Google workflow nodes.",
   "min_app_version": "1.2.45",

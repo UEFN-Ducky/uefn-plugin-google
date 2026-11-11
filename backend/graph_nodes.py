@@ -181,26 +181,31 @@ def generate_image(prompt: str, **options: Any) -> dict[str, Any]:
 MEDIA_INTENT = (r"\b(gemini|google|imagen|veo|nano[- ]?banana|image|picture|draw|illustration|concept art"
                 r"|video|clip|animation|trailer)\b")
 PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
-VEO_DEFAULT = "veo-3.0-fast-generate-001"
+# Video on a Gemini API key is Gemini Omni (the Interactions API); some keys also list Veo.
+# Nov 11 2026, on a real key: no Veo model at all, three gemini-omni ones.
+VIDEO_DEFAULT = "gemini-omni-1.2-flash"
 # What to tell the person about each model when asking which to use. A model not here is listed plain.
 MODEL_NOTES = {
     "gemini-2.5-flash-image": "fast, the lowest price (Nano Banana)",
     "gemini-3.1-flash-lite-image": "the lightest and quickest",
     "gemini-3.1-flash-image": "newer, fast, better with text in the picture",
     "gemini-3-pro-image": "the best quality, slower, the highest price",
+    "gemini-omni-1.2-flash": "3 to 15 second clips with sound, the newest",
+    "gemini-omni-1.1-flash": "the earlier Omni model",
 }
 VIDEO_WAIT_S = 300.0  # one tool call waits this long; gemini_video_status picks a longer one up
 _API = "https://generativelanguage.googleapis.com/v1beta"
 
 
-def _listed(key: str, word: str) -> list[str]:
-    """Model ids this key lists whose name has ``word``, newest first (one free listing). A
-    "-preview" twin of a released model is left out."""
+def _listed(key: str, *words: str) -> list[str]:
+    """Model ids this key lists whose name has one of ``words``, newest first (one free
+    listing). A "-preview" twin of a released model is left out."""
     q = urllib.parse.urlencode({"key": key, "pageSize": 1000})
     with urllib.request.urlopen(f"{_API}/models?{q}", timeout=30) as resp:
         rows = json.loads(resp.read().decode("utf-8")).get("models") or []
     ids = {str(row.get("name") or "").replace("models/", "") for row in rows if isinstance(row, dict)}
-    return sorted((i for i in ids if word in i and not (i.endswith("-preview") and i[:-8] in ids)), reverse=True)
+    return sorted((i for i in ids if any(w in i for w in words)
+                   and not (i.endswith("-preview") and i[:-8] in ids)), reverse=True)
 
 
 def image_models(key: str) -> list[str]:
@@ -208,35 +213,43 @@ def image_models(key: str) -> list[str]:
 
 
 def video_models(key: str) -> list[str]:
-    return _listed(key, "veo")
+    return _listed(key, "omni", "veo")
 
 
 def _choices(key: str, kind: str) -> list[dict[str, str]]:
-    """What the person can pick from, with a few words on each. A listing that fails still
-    offers the models known to work."""
+    """What the person can pick from, with a few words on each. A picture listing that fails
+    still offers the models known to work. Video never names a model the key did not list:
+    the first version offered a guessed Veo name as "available" and Google answered 404."""
     try:
         ids = image_models(key) if kind == "picture" else video_models(key)
     except (OSError, ValueError):
         ids = []
-    ids = ids or (list(IMAGE_FALLBACKS) if kind == "picture" else [VEO_DEFAULT])
+    if not ids and kind == "picture":
+        ids = list(IMAGE_FALLBACKS)
     return [{"id": i, **({"about": MODEL_NOTES[i]} if i in MODEL_NOTES else {})} for i in ids]
 
 
 def _default(models: list[dict[str, str]], kind: str) -> str:
     """The model "auto" means: the usual one when this key lists it, else the first it lists."""
-    usual = GEMINI_IMAGE if kind == "picture" else VEO_DEFAULT
+    usual = GEMINI_IMAGE if kind == "picture" else VIDEO_DEFAULT
     ids = [row["id"] for row in models]
-    return usual if usual in ids or not ids else ids[0]
+    if not ids:
+        return usual if kind == "picture" else ""
+    return usual if usual in ids else ids[0]
 
 
 def ask_first(key: str, kind: str, tool: str) -> str:
     """The answer to a call the person has not agreed to yet: nothing was made, nothing was
     billed. It names what is available and what it costs, for the ducky to ask the person."""
     models = _choices(key, kind)
+    if not models:
+        return json.dumps({"made": False, "billed": False, "models": [], "tell_the_person": (
+            "This Google API key lists no video models, so no video can be made with it. Video needs a key "
+            f"from a Google account with billing turned on. Nothing was made or billed. {PRICING_URL}")})
     billed = ("Google bills each picture to the person's own Google API key (a free-tier key has a daily allowance)."
               if kind == "picture" else
-              "Google bills video per second of footage to the person's own Google API key; Veo needs a paid key "
-              "and one clip can cost a few dollars.")
+              "Google bills video per second of footage to the person's own Google API key; it needs a key with "
+              "billing on, and one clip can cost a few dollars.")
     return json.dumps({
         "made": False,
         "billed": False,
@@ -248,6 +261,47 @@ def ask_first(key: str, kind: str, tool: str) -> str:
         "default": _default(models, kind),
         "cost": f"{billed} Prices: {PRICING_URL}",
     })
+
+
+def _find_video(node: Any) -> dict[str, Any]:
+    """The first video part (its ``data`` or ``uri``) anywhere in an Interaction's steps."""
+    if isinstance(node, dict):
+        mime = str(node.get("mime_type") or node.get("mimeType") or "")
+        if (node.get("type") == "video" or mime.startswith("video/")) and (node.get("data") or node.get("uri")):
+            return node
+        node = list(node.values())
+    if isinstance(node, list):
+        for item in node:
+            found = _find_video(item)
+            if found:
+                return found
+    return {}
+
+
+def _omni_video(model: str, prompt: str, key: str, seconds: int, aspect_ratio: str) -> bytes:
+    """One Gemini Omni clip through the Interactions API (Google's cookbook Get_started_Omni):
+    the call returns when the clip is made, with the video in its steps."""
+    from google import genai
+
+    client = genai.Client(api_key=key)
+    if not hasattr(client, "interactions"):
+        raise ValueError("This Ducky's Google library is too old for Gemini video. Update UEFN Ducky.")
+    fmt: dict[str, Any] = {"type": "video"}
+    if aspect_ratio:
+        fmt["aspect_ratio"] = str(aspect_ratio)
+    if seconds:
+        fmt["duration"] = f"{int(seconds)}s"  # Omni: "3s" to "15s"
+    interaction = client.interactions.create(model=model, input=prompt, response_format=fmt)
+    dump = getattr(interaction, "model_dump", None)
+    video = _find_video(dump(exclude_none=True) if callable(dump) else interaction)
+    data = video.get("data")
+    if isinstance(data, str):
+        data = base64.b64decode(data)
+    if not data and video.get("uri"):
+        data = _veo_download(str(video["uri"]), key)
+    if not data:
+        raise ValueError("Google finished without a video. Try wording the prompt differently.")
+    return bytes(data)
 
 
 def _veo_start(model: str, prompt: str, key: str, image: Path | None, seconds: int, aspect_ratio: str) -> str:
@@ -388,14 +442,15 @@ def register_tools(api: Any) -> None:
     @tool("gemini_generate_video")
     def gemini_generate_video(prompt: str, model: str = "", image: str = "", seconds: int = 0,
                               aspect_ratio: str = "", confirm_spend: bool = False) -> str:
-        """Make a short video with Google Veo and show it in this chat. Veo is billed per second
-        of footage to the person's own Google API key and needs a paid key, so ASK FIRST: call
+        """Make a short video with Google (Gemini Omni, or Veo where the key has it) and show it
+        in this chat. Video is billed per second of footage to the person's own Google API key
+        and needs a key with billing on, so ASK FIRST: call
         it with just the prompt and it answers with the models available and the cost, and
         makes nothing. Ask the person which model and whether they agree (ducky_ask_user), then
         call again with model=<their pick> and confirm_spend=true. image: path of a picture the
-        video starts from (optional). seconds / aspect_ratio ("16:9", "9:16"): optional, the
-        model's own defaults when left out. Takes a few minutes; a clip still being made answers
-        with an operation for gemini_video_status."""
+        video starts from (Veo models only). seconds (Omni: 3 to 15) / aspect_ratio ("16:9",
+        "9:16"): optional, the model's own defaults when left out. Takes a few minutes; a Veo
+        clip still being made answers with an operation for gemini_video_status."""
         text = str(prompt or "").strip()
         if not text:
             raise ValueError("Say what the video shows (prompt).")
@@ -408,11 +463,26 @@ def register_tools(api: Any) -> None:
             raise ValueError(f"reference picture not found: {start}")
         if picked.lower() in ("auto", "default"):
             picked = _default(_choices(key, "video"), "video")
+            if not picked:
+                return ask_first(key, "video", "gemini_generate_video")  # says the key has none
         try:
-            operation = _veo_start(picked, text, key, Path(start) if start else None, seconds, aspect_ratio)
-            return _video_answer(operation, key, text, picked, VIDEO_WAIT_S)
+            if picked.startswith("veo"):
+                operation = _veo_start(picked, text, key, Path(start) if start else None, seconds, aspect_ratio)
+                return _video_answer(operation, key, text, picked, VIDEO_WAIT_S)
+            if start:
+                # ponytail: Omni takes pictures as input parts; add when someone needs image-to-video.
+                raise ValueError("A starting picture works with Veo models only for now. Leave image out.")
+            saved = _persist_video(_omni_video(picked, text, key, seconds, aspect_ratio), prompt=text, model=picked)
+            path = str(saved.get("path") or "")
+            return json.dumps({"ok": True, "made": True, "path": path.replace("\\", "/"), "downloaded": [path],
+                               "media_url": str(saved.get("media_url") or ""), "model": picked,
+                               "maker": "Google Gemini Omni"})
         except (urllib.error.HTTPError, OSError) as exc:
             raise refused(exc) from exc
+        except ValueError:
+            raise
+        except Exception as exc:  # the Google library's own errors: its sentence says why
+            raise ValueError(f"Google made no video: {str(exc)[:300]}") from exc
 
     @tool("gemini_video_status")
     def gemini_video_status(operation: str, wait: bool = True) -> str:
@@ -437,7 +507,8 @@ def register_tools(api: Any) -> None:
 
     @tool("gemini_video_models")
     def gemini_video_models() -> str:
-        """List the Veo video models the person's Google API key can use (free, nothing is made)."""
+        """List the video models (Gemini Omni, Veo) the person's Google API key can use; an empty
+        list means the key cannot make video (free, nothing is made)."""
         models = _choices(key_or_raise(), "video")
         return json.dumps({"default": _default(models, "video"), "models": models})
 
