@@ -12,14 +12,37 @@ from pathlib import Path
 from typing import Any
 
 NODES = ("google.complete", "google.image")
-# Imagen takes no picture: a reference picture goes to this Gemini image model unless one is picked.
+# The picture model when none is picked, and for a reference picture (Imagen takes none).
 GEMINI_IMAGE = "gemini-2.5-flash-image"
+# Tried in order when the asked model is gone (404). Nov 11 2026, on a real key: the old
+# default imagen-4.0-generate-001 is "not found for API version v1beta"; these three made pictures.
+IMAGE_FALLBACKS = (GEMINI_IMAGE, "gemini-3.1-flash-image", "gemini-3-pro-image")
 
 
 def _secret(name: str) -> str:
+    """The Google key this PC would chat with: the picked key account, else the plain saved
+    key. Reading only the plain key answered "Google key required" to everyone whose keys are
+    key accounts (every key added since accounts)."""
+    try:
+        from backend.agent import accounts
+
+        key = (accounts.account_key(name, accounts.pick_account(name)) or "").strip()
+        if key:
+            return key
+    except Exception:
+        pass
     from backend.agent.secrets import get_key
 
     return get_key(name) or ""
+
+
+def _google_reason(exc: urllib.error.HTTPError) -> str:
+    """Google's own sentence for a refused call ("API 400" alone told nobody what to fix)."""
+    try:
+        message = str(json.loads(exc.read().decode("utf-8", "replace"))["error"]["message"]).strip()
+    except Exception:
+        message = ""
+    return f"Google refused the picture ({exc.code}): {message[:300]}" if message else f"Google refused the picture (HTTP {exc.code})"
 
 
 def _persist(raw: bytes, *, prompt: str, gateway: str, model: str) -> dict[str, Any]:
@@ -99,7 +122,7 @@ def handle_image(ctx: dict[str, Any]) -> dict[str, Any]:
     prompt = str(cfg.get("prompt") or payload.get("prompt") or "").strip()
     if not prompt:
         return {"ok": False, "error": "prompt required"}
-    model = str(cfg.get("model") or "imagen-4.0-generate-001")
+    model = str(cfg.get("model") or GEMINI_IMAGE)
     image = _image_path(cfg.get("image") or payload.get("image"))
     if image and not Path(image).is_file():
         return {"ok": False, "error": f"reference picture not found: {image}"}
@@ -107,20 +130,28 @@ def handle_image(ctx: dict[str, Any]) -> dict[str, Any]:
         model = GEMINI_IMAGE
     key = _secret("gemini")
     if not key:
-        return {"ok": False, "error": "Google key required"}
-    gemini = model.startswith("gemini-")
-    try:
-        if gemini:
-            b64 = _gemini_b64(_gemini_http(model, _gemini_body(prompt, Path(image) if image else None), key))
-        else:
-            pred = (_imagen_http(model, prompt, key).get("predictions") or [{}])[0]
-            b64 = str(pred.get("bytesBase64Encoded") or pred.get("bytes") or "")
-    except urllib.error.HTTPError as exc:
-        return {"ok": False, "error": f"{'gemini' if gemini else 'imagen'} API {exc.code}"}
-    except OSError as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "Add a Google API key in Settings → LLMs → Google to make pictures."}
+    b64, error = "", ""
+    # The asked model, then the ones known to make pictures: a model Google retired (404)
+    # moves on instead of failing every picture until the plugin updates.
+    for candidate in dict.fromkeys((model, *IMAGE_FALLBACKS)):
+        try:
+            if candidate.startswith("gemini-"):
+                b64 = _gemini_b64(_gemini_http(candidate, _gemini_body(prompt, Path(image) if image else None), key))
+            else:
+                pred = (_imagen_http(candidate, prompt, key).get("predictions") or [{}])[0]
+                b64 = str(pred.get("bytesBase64Encoded") or pred.get("bytes") or "")
+        except urllib.error.HTTPError as exc:
+            error = error or _google_reason(exc)
+            if exc.code == 404:
+                continue
+            return {"ok": False, "error": error}
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        model = candidate
+        break
     if not b64:
-        return {"ok": False, "error": "no image bytes"}
+        return {"ok": False, "error": error or "Google answered without a picture. Try wording the prompt differently."}
     raw = base64.b64decode(b64)
     saved = _persist(raw, prompt=prompt, gateway="google", model=model)
     path = str(saved.get("path") or "")
@@ -133,11 +164,11 @@ def handle_image(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def generate_image(prompt: str, **options: Any) -> dict[str, Any]:
-    """Host media generator (kind 'image'): Imagen picture → ``{path, mime}``."""
+    """Host media generator (kind 'image'): a Gemini picture → ``{path, mime}``."""
     cfg = {"prompt": prompt, "model": options.get("model") or ""}
     out = handle_image({"config": cfg, "payload": {}})
     if not out.get("ok"):
-        raise RuntimeError(out.get("error") or "Imagen failed")
+        raise RuntimeError(out.get("error") or "Google made no picture")
     return {"path": out["path"], "mime": "image/png"}
 
 

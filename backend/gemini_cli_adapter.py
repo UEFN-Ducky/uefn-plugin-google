@@ -212,26 +212,6 @@ def note_key_limit(account_id: str, *texts: Any) -> None:
         pass
 
 
-def gemini_include_dirs(cwd: str) -> list[str]:
-    """Added projects besides cwd, for --include-directories."""
-    try:
-        from frontend.ui_web.recent_projects import load_recent_projects
-    except Exception:
-        return []
-    import os
-
-    cwd_key = os.path.normcase(str(Path(cwd).resolve()))
-    out: list[str] = []
-    for item in load_recent_projects():
-        path = Path(item)
-        if not path.is_dir():
-            continue
-        if os.path.normcase(str(path.resolve())) == cwd_key:
-            continue
-        out.append(str(path))
-    return out
-
-
 KEY_URL = "https://aistudio.google.com/apikey"
 PERSONAL_LOGIN_REFUSED = (
     "Google no longer lets personal Google accounts use Gemini CLI (since June 2026). "
@@ -561,7 +541,10 @@ class GeminiCliAdapter:
                 model=model_id,
                 extra_args=extra_args,
                 auto_approve=self._auto_approve(),
-                include_dirs=gemini_include_dirs(cwd),
+                # No --include-directories: the CLI describes every folder it is given in
+                # each request. With the person's 16 other projects a "Say OK." cost 46,611
+                # input tokens, without them 10,261 (measured Nov 11 2026). Ducky's
+                # workspace tools already reach those projects.
                 session_id=sid,
             )
             state = _GeminiStream(conv_id, run_id, push)

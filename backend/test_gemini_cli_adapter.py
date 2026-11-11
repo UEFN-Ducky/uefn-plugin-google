@@ -76,6 +76,9 @@ def test_a_followup_resumes_the_session_and_does_not_resend_the_system_prompt(mo
 def test_a_first_turn_sends_the_system_prompt_once(monkeypatch, tmp_path) -> None:
     _result, runs, _finals = _launch(monkeypatch, tmp_path, [_res(True)])
     assert "--resume" not in runs[0]["argv"] and runs[0]["stdin_data"] == "RULES"
+    # Every folder the CLI is given is described in each request: 46,611 input tokens for
+    # "Say OK." with the person's 16 other projects, 10,261 without (measured live).
+    assert "--include-directories" not in runs[0]["argv"]
     assert "GEMINI_CLI_HOME" not in runs[0]["env_extra"]  # no home could be made: the CLI's own
 
 
