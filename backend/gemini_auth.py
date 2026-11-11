@@ -8,6 +8,7 @@ reads logged in. Tokens never leave the account's own folder and are never logge
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -16,6 +17,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 LOGIN_TIMEOUT_S = 300.0
+# After sign-in the CLI's own first run ("Reply with OK.") tells whether Google lets this
+# account use Gemini: it is waited for this long instead of stopped at once.
+ACCESS_CHECK_S = 60.0
+ACCESS_FILE = "ducky_access.json"  # in the account's .gemini folder
+NO_ACCESS = "No Gemini access: Google no longer allows personal accounts in Gemini CLI. Add a free API key above."
 NOT_FINISHED = "Sign-in didn't finish, try again."
 WAITING = "Waiting for Google sign-in in your browser…"
 NOT_INSTALLED = "Gemini CLI isn't installed yet. Ducky is installing it now; press Log in again in a minute."
@@ -54,12 +60,37 @@ def _stop(proc: Any) -> None:
         pass
 
 
+def write_access(dot: Path, ok: bool, reason: str = "") -> None:
+    """What Google said about this account last: allowed, or refused (and why)."""
+    try:
+        dot.mkdir(parents=True, exist_ok=True)
+        (dot / ACCESS_FILE).write_text(json.dumps({"ok": bool(ok), "reason": reason[:300], "at": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_access(dot: Path) -> dict[str, Any] | None:
+    try:
+        got = json.loads((dot / ACCESS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def clear_access(dot: Path) -> None:
+    try:
+        (dot / ACCESS_FILE).unlink()
+    except OSError:
+        pass
+
+
 def start_browser_login(
     config_dir: str | None,
     *,
     popen: Callable[..., Any] = subprocess.Popen,
     timeout_s: float = LOGIN_TIMEOUT_S,
     poll_s: float = 0.5,
+    access_check_s: float | None = None,
 ) -> dict[str, Any]:
     """Start the hidden sign-in for this account (``None`` = the CLI's own home)."""
     from .cli_update import hidden_run_kwargs, resolve_bin
@@ -71,6 +102,7 @@ def start_browser_login(
         return {"error": NOT_INSTALLED}
     dot = _dot_gemini(config_dir)
     dot.mkdir(parents=True, exist_ok=True)
+    clear_access(dot)  # a new sign-in: what Google says about it comes from this run
     env = {k: v for k, v in os.environ.items() if k not in ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
     env.update(account_env(config_dir))
     # ponytail: a settings.json that picks another auth type wins over this env; that
@@ -119,7 +151,10 @@ def start_browser_login(
     with _LOCK:
         _STATE[key] = state
     threading.Thread(
-        target=_watch, args=(state, dot / "oauth_creds.json", timeout_s, poll_s, launch), name="gemini-login", daemon=True
+        target=_watch,
+        args=(state, dot / "oauth_creds.json", timeout_s, poll_s, launch,
+              ACCESS_CHECK_S if access_check_s is None else access_check_s),
+        name="gemini-login", daemon=True,
     ).start()
     return {"message": WAITING}
 
@@ -131,7 +166,8 @@ def _output(proc: Any) -> str:
     return "".join(getattr(proc, "ducky_output", []))
 
 
-def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float, launch: Callable[[], Any]) -> None:
+def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float, launch: Callable[[], Any],
+           access_check_s: float = 0.0) -> None:
     from .cli_update import BROKEN_INSTALL, error_line, is_broken_install_error, update_cli
 
     deadline = time.monotonic() + timeout_s
@@ -166,12 +202,29 @@ def _watch(state: dict[str, Any], creds: Path, timeout_s: float, poll_s: float, 
             error = f"Could not start Gemini CLI: {exc}"
             break
     ok = creds.is_file()
-    _stop(state["proc"])  # signed in: the prompt it would answer is not needed
     with _LOCK:
         state["pending"] = False
         state["error"] = "" if ok else error
-    if ok:
-        _refresh_agents()
+    if not ok:
+        _stop(state["proc"])
+        return
+    _refresh_agents()  # the row reads signed in now; whether Google allows it follows
+    proc = state["proc"]
+    end = time.monotonic() + max(0.0, access_check_s)
+    while proc.poll() is None and time.monotonic() < end:
+        time.sleep(poll_s)
+    finished = proc.poll() is not None
+    _stop(proc)
+    if not finished:
+        return  # no answer in time: unknown, the first chat tells
+    from .gemini_cli_adapter import personal_login_refused
+
+    text = _output(proc)
+    if personal_login_refused(text):
+        write_access(creds.parent, False, NO_ACCESS)
+    elif getattr(proc, "returncode", 1) == 0:
+        write_access(creds.parent, True)
+    _refresh_agents()
 
 
 def _refresh_agents() -> None:

@@ -120,6 +120,15 @@ def account_status(config_dir: str | None) -> dict[str, Any]:
         from .gemini_auth import login_state
 
         status.update(login_state(folder))  # pending / error of a browser sign-in
+        return status
+    from .gemini_auth import read_access
+
+    access = read_access(folder)
+    if access is not None and access.get("ok") is False:
+        # Signed in, but Google refuses this account (personal accounts, June 2026):
+        # the row says so instead of a green Default.
+        status["access"] = "none"
+        status["error"] = str(access.get("reason") or "No Gemini access for this account.")
     return status
 
 
@@ -134,7 +143,8 @@ def is_gemini_logged_in() -> bool:
     """A Google login in the CLI's home, or an API key it can run on (env or the saved Google key)."""
     if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
         return True
-    if account_status(None).get("loggedIn"):
+    own = account_status(None)
+    if own.get("loggedIn") and own.get("access") != "none":
         return True
     return bool(pick_gemini_key({})[1])
 
@@ -145,8 +155,9 @@ def account_logout(config_dir: str | None) -> None:
             (_dot_gemini(config_dir) / name).unlink()
         except OSError:
             pass
-    from .gemini_auth import _refresh_agents
+    from .gemini_auth import _refresh_agents, clear_access
 
+    clear_access(_dot_gemini(config_dir))
     _refresh_agents()
 
 
@@ -547,6 +558,11 @@ class GeminiCliAdapter:
             note_key_limit(key_account, result.error, state.error_text, proc.stderr_tail)
             if personal_login_refused(result.error or "", state.error_text, proc.stderr_tail, proc.raw_tail):
                 result.error = PERSONAL_LOGIN_REFUSED
+                if not key:  # the login account was refused: its row says so from now on
+                    from .gemini_auth import NO_ACCESS, _refresh_agents, write_access
+
+                    write_access(_dot_gemini(env.get(HOME_ENV) or None), False, NO_ACCESS)
+                    _refresh_agents()
                 return result  # not a stale install: updating the CLI changes nothing
         if result.ok or not should_heal_launch(
             result.error or "",

@@ -15,48 +15,40 @@ def _provider() -> GeminiProvider:
 
 
 class _Models:
-    """generate_content 404s for retired models; list() returns what this key can use."""
+    """A key's models: list() answers (or refuses); generate_content must never be called."""
 
-    def __init__(self, live: set[str]) -> None:
-        self.live, self.tried = live, []
+    def __init__(self, error: str = "") -> None:
+        self.error, self.generated, self.listed = error, [], []
 
-    def generate_content(self, model: str, contents: str) -> Any:
-        self.tried.append(model)
-        if model not in self.live:
-            raise RuntimeError(f"404 NOT_FOUND. models/{model} is no longer available to new users.")
+    def generate_content(self, **kw: Any) -> Any:
+        self.generated.append(kw)
         return SimpleNamespace(text="pong")
 
-    def list(self) -> list[Any]:
-        gen = ["generateContent"]
-        return [SimpleNamespace(name=f"models/{n}", supported_actions=gen) for n in
-                ("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.8-flash-preview-tts", "gemini-3.8-pro")]
+    def list(self, config: Any = None) -> list[Any]:
+        self.listed.append(config)
+        if self.error:
+            raise RuntimeError(self.error)
+        return [SimpleNamespace(name="models/gemini-3.8-flash")]
 
 
-def _key_test(model: str, live: set[str]) -> tuple[tuple[bool, str], list[str]]:
-    p = GeminiProvider("test-key", model)
-    models = _Models(live)
+def _key_test(error: str = "") -> tuple[tuple[bool, str], _Models]:
+    p = GeminiProvider("test-key", "gemini-2.5-flash")  # a model Google retired: never asked
+    models = _Models(error)
     p._client = lambda: SimpleNamespace(models=models)  # type: ignore[method-assign]
-    return asyncio.run(p.test_connection()), models.tried
+    return asyncio.run(p.test_connection()), models
 
 
-def test_key_test_falls_back_when_the_test_model_is_retired() -> None:
-    (ok, detail), tried = _key_test("gemini-2.5-flash", {"gemini-3.8-flash"})
-    assert ok and detail == "Gemini OK" and tried == ["gemini-2.5-flash", "gemini-3.8-flash"]
+def test_key_test_is_one_model_listing_not_a_generated_reply() -> None:
+    """Saving a key 'took forever' (a thinking model answering 'ping'), and a retired test
+    model 404'd a good key."""
+    (ok, detail), models = _key_test()
+    assert ok and detail == "Gemini OK"
+    assert models.generated == [] and models.listed == [{"page_size": 1}]
 
 
-def test_key_test_bad_key_is_not_retried() -> None:
-    p = GeminiProvider("bad", "gemini-flash-latest")
-
-    class Denied(_Models):
-        def generate_content(self, model: str, contents: str) -> Any:
-            self.tried.append(model)
-            raise RuntimeError("400 API_KEY_INVALID")
-
-    models = Denied(set())
-    p._client = lambda: SimpleNamespace(models=models)  # type: ignore[method-assign]
-    ok, detail = asyncio.run(p.test_connection())
-    assert not ok and "API_KEY_INVALID" in detail and models.tried == ["gemini-flash-latest"]
-
+def test_key_test_bad_key_fails_with_googles_reason() -> None:
+    (ok, detail), models = _key_test("400 API_KEY_INVALID")
+    assert not ok and "API_KEY_INVALID" in detail and models.generated == []
 
 def _tool_loop_messages() -> list[ProviderMessage]:
     """A live tool loop: the model called search_assets and we answered it."""

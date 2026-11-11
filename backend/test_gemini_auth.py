@@ -32,6 +32,7 @@ class FakeCli:
 def cli(monkeypatch):
     monkeypatch.setattr(cli_update, "resolve_bin", lambda _o="": "gemini.cmd")
     monkeypatch.setenv("GEMINI_API_KEY", "should-not-reach-the-cli")
+    monkeypatch.setattr(gemini_auth, "ACCESS_CHECK_S", 0.0)
     gemini_auth._STATE.clear()
 
 
@@ -51,7 +52,10 @@ def test_browser_sign_in_writes_creds_then_logged_in(cli, tmp_path):
     assert fake.argv[0] == "gemini.cmd" and fake.env["GEMINI_CLI_HOME"] == str(home)
     assert fake.env["GOOGLE_GENAI_USE_GCA"] == "true" and "GEMINI_API_KEY" not in fake.env
     assert _settle(home) == {"loggedIn": True, "email": "you@gmail.com"}
-    assert fake.killed  # the prompt run is stopped once signed in
+    end = time.monotonic() + 2
+    while not fake.killed and time.monotonic() < end:
+        time.sleep(0.01)
+    assert fake.killed  # the prompt run is stopped once signed in (and checked)
 
 
 def test_sign_in_refreshes_the_agent_list(cli, tmp_path, monkeypatch):
@@ -63,6 +67,34 @@ def test_sign_in_refreshes_the_agent_list(cli, tmp_path, monkeypatch):
     while not calls and time.monotonic() < end:
         time.sleep(0.01)
     assert calls == [1]  # the Google dot and the picker re-read now, not in 10 minutes
+
+
+class RefusedCli(FakeCli):
+    """Signs in, then Google refuses the account (personal accounts, June 2026)."""
+
+    def __call__(self, argv, **kw):
+        super().__call__(argv, **kw)
+        self.stdout = iter(["Error authenticating: IneligibleTierError: This client is no longer "
+                            "supported for Gemini Code Assist for individuals.\n"])
+        return self
+
+    def poll(self):
+        return 1
+
+
+def test_a_refused_account_shows_no_access_not_default(cli, tmp_path, monkeypatch):
+    monkeypatch.setattr(gemini_auth, "_refresh_agents", lambda: None)
+    gemini_auth.start_browser_login(str(tmp_path), popen=RefusedCli(tmp_path, writes=True),
+                                    poll_s=0.01, access_check_s=1.0)
+    end = time.monotonic() + 3
+    while account_status(str(tmp_path)).get("access") != "none" and time.monotonic() < end:
+        time.sleep(0.02)
+    st = account_status(str(tmp_path))
+    assert st["loggedIn"] is True and st["access"] == "none" and st["error"] == gemini_auth.NO_ACCESS
+    from backend.gemini_cli_adapter import account_logout
+
+    account_logout(str(tmp_path))  # logging out forgets the verdict with the login
+    assert gemini_auth.read_access(tmp_path / ".gemini") is None
 
 
 def test_sign_in_that_never_finishes_times_out(cli, tmp_path):
