@@ -161,7 +161,14 @@ def is_limit_error(text: str) -> bool:
 KEY_RATE_LIMITED = (
     "This Gemini key hit Google's rate limit (429). Free keys allow only a few requests a "
     "minute: wait a minute and send again, pick a Flash model, or add another key in "
-    "Settings → LLMs → Google."
+    "Settings → LLMs → Google. This chat runs through Gemini CLI, which uses many more tokens "
+    "per message than the API: to use the API directly, pick the model under Google in the "
+    "model picker."
+)
+# A chat left on a Gemini CLI row from when it repeated the API models (before 1.0.47).
+API_MODEL_ON_CLI = (
+    "This chat runs through Gemini CLI. For fewer tokens per message, pick this model under "
+    "Google in the model picker (the direct API)."
 )
 LOGIN_RATE_LIMITED = (
     "This Google account hit its Gemini rate limit (429). Wait a minute and send again, or "
@@ -301,6 +308,25 @@ def build_gemini_argv(
     return argv
 
 
+def usage_from_stats(stats: dict[str, Any]) -> dict[str, int]:
+    """The CLI's result stats in core's usage shape: ``input_tokens`` is the whole prompt and
+    ``cache_read_tokens`` the part Google served from its cache (the Gemini API provider's
+    shape). The CLI's ``input`` is only the uncached part: reading that alone made the
+    Context panel show 2K for a 47K-token request."""
+    def num(key: str) -> int:
+        try:
+            return max(0, int(stats.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    cached = num("cached")
+    return {
+        "input_tokens": num("input_tokens") or (num("input") + cached),
+        "output_tokens": num("output_tokens") or num("output"),
+        "cache_read_tokens": cached,
+    }
+
+
 class _GeminiStream:
     def __init__(self, conv_id: str, run_id: str, push: Any) -> None:
         self.conv_id = conv_id
@@ -388,10 +414,7 @@ class _GeminiStream:
         if et == "result":
             stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
             if stats:
-                self.usage = {
-                    "input_tokens": int(stats.get("input") or stats.get("input_tokens") or 0),
-                    "output_tokens": int(stats.get("output") or stats.get("output_tokens") or 0),
-                }
+                self.usage = usage_from_stats(stats)
             resp = str(data.get("response") or "").strip()
             if resp and not self.text_parts:
                 self.text_parts.append(resp)
@@ -517,7 +540,8 @@ class GeminiCliAdapter:
 
         # Prefer the Google gateway API key (the picked key account) unless a login account runs.
         key_account, key = pick_gemini_key(env)
-        login_dot = _dot_gemini(env.get(HOME_ENV) or None)  # the account's own folder
+        own_home = env.get(HOME_ENV) or ""
+        login_dot = _dot_gemini(own_home or None)  # the account's own folder
         env = run_env(env, key, auto_approve=self._auto_approve())
         # The chat's own CLI home: Ducky's tools, a short retry budget, and its sessions.
         home = prepare_home(conv_id, mcp_config_path, None if key else login_dot)
@@ -570,9 +594,24 @@ class GeminiCliAdapter:
         def limited(res: Any) -> bool:
             return any(is_limit_error(t) for t in (res.error or "", *tails) if t)
 
-        push({"type": "status", "text": "Starting Gemini CLI…", "conv_id": conv_id, "run_id": run_id})
+        on_api_model = bool(key) and model_id.lower() not in {r["id"] for r in CLI_ALIAS_ROWS}
+        push({"type": "status", "text": API_MODEL_ON_CLI if on_api_model else "Starting Gemini CLI…",
+              "conv_id": conv_id, "run_id": run_id})
         sid = (session_id or "").strip()
         result = run(sid, binary)
+        if (not key and home and not result.ok and not limited(result) and not result.reply_text
+                and getattr(result, "status", "") in ("error", "needs_login")
+                and not personal_login_refused(result.error or "", *tails)):
+            # A Google sign-in that doesn't work from the chat's copied home (untested with a
+            # company account): once more in the account's own home, as before 1.0.47. That
+            # run has no Ducky tools or session, but the chat answers.
+            if own_home:
+                env[HOME_ENV] = own_home
+            else:
+                env.pop(HOME_ENV, None)
+            home, sid = "", ""
+            result = run(sid, binary)
+            result.upstream_session_id = ""  # that session lives in another home: never resumed
         if (sid and not result.ok and getattr(result, "status", "") == "error" and not limited(result)
                 and not result.reply_text and not getattr(result, "blocks", None)):
             # The CLI no longer has that session (or can't open it): once more as a new one,

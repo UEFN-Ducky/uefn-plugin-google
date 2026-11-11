@@ -102,6 +102,45 @@ def test_a_429_is_said_plainly_and_never_run_again(monkeypatch, tmp_path) -> Non
     assert result.error == gca.LOGIN_RATE_LIMITED
 
 
+def test_usage_counts_the_whole_prompt_and_what_google_cached() -> None:
+    """The CLI's `input` is only the uncached part: the Context panel showed 2K for a 47K request."""
+    from backend.gemini_cli_adapter import _GeminiStream, usage_from_stats
+
+    stats = {"total_tokens": 46600, "input_tokens": 46585, "output_tokens": 2, "cached": 44536, "input": 2049}
+    assert usage_from_stats(stats) == {"input_tokens": 46585, "output_tokens": 2, "cache_read_tokens": 44536}
+    assert usage_from_stats({"input": 2049, "cached": 44536, "output": 2})["input_tokens"] == 46585  # older keys
+    assert usage_from_stats({"input": "x"}) == {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+    stream = _GeminiStream("c", "r", lambda _e: None)
+    stream.on_line('{"type": "result", "stats": {"input_tokens": 10, "output_tokens": 3, "cached": 4}}')
+    assert stream.usage == {"input_tokens": 10, "output_tokens": 3, "cache_read_tokens": 4}
+
+
+def test_a_sign_in_that_fails_in_the_chat_home_runs_in_the_accounts_own_home(monkeypatch, tmp_path) -> None:
+    result, runs, _finals = _launch(
+        monkeypatch, tmp_path, [_res(False, error="Please set an Auth method", status="needs_login"), _res(True, reply="hi")],
+        home=str(tmp_path / "h"))
+    assert result.ok and len(runs) == 2 and result.upstream_session_id == ""
+    assert "GEMINI_CLI_HOME" not in runs[1]["env_extra"]  # the CLI's own home, as before the chat homes
+    assert runs[1]["stdin_data"].startswith("RULES")  # a new session there: the system prompt goes again
+
+
+def test_an_old_chat_on_an_api_model_row_is_told_about_the_api(monkeypatch, tmp_path) -> None:
+    from backend import gemini_cli_adapter as gca
+
+    said: list[str] = []
+    monkeypatch.setattr(gca, "run_streaming_process", lambda **kw: SimpleNamespace(
+        returncode=0, stderr_tail="", raw_tail="", stdout_lines=0, timed_out=False, cancelled=False))
+    monkeypatch.setattr("backend.cli_update.resolve_bin", lambda _p="": "gemini.cmd")
+    monkeypatch.setattr("backend.gemini_home.prepare_home", lambda *a, **k: "")
+    monkeypatch.setattr(gca, "finalize_cli_turn", lambda **kw: _res(True))
+    for model, key in (("gemini-3.8-flash", "K"), ("flash", "K"), ("gemini-3.8-flash", "")):
+        monkeypatch.setattr(gca, "pick_gemini_key", lambda _env, key=key: ("default" if key else "", key))
+        gca.GeminiCliAdapter().launch(
+            prompt="hey", system_prompt="", cwd=str(tmp_path), conv_id="c1", model=model, mcp_config_path="",
+            extra_args="", cli_path="", env={}, push=lambda e: said.append(e["text"]) if e.get("type") == "status" else None)
+    assert said == [gca.API_MODEL_ON_CLI, "Starting Gemini CLI…", "Starting Gemini CLI…"]
+
+
 def test_picker_is_empty_without_a_live_catalog(monkeypatch) -> None:
     monkeypatch.setattr("backend.gemini_cli_adapter._gemini_cli_model_rows", lambda: [])
     assert GeminiCliAdapter().detect(settings=None).models == []
