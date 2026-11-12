@@ -18,6 +18,7 @@
         "kind": "secret",
         "secret_key": "gemini",
         "key_url": "https://aistudio.google.com/apikey",
+        "key_first": true,
         "order": 30
       }
     ],
