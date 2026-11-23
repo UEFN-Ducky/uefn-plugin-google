@@ -126,6 +126,20 @@ def _ducky_python(repo: Path, target: str = "") -> str:
     return str(venv) if venv.is_file() else sys.executable
 
 
+def _ensure_build_deps(repo: Path, python: str) -> None:
+    """A bare Linux build image has none of Ducky's requirements: install the engine's CPU
+    check disassembler (iced-x86) at the version Ducky's requirements.txt pins."""
+    if subprocess.run([python, "-c", "import iced_x86"], capture_output=True, check=False).returncode == 0:
+        return
+    pins = [line.split("#")[0].strip() for line in (repo / "requirements.txt").read_text(encoding="utf-8").splitlines()]
+    pins = [p for p in pins if p.lower().startswith("iced-x86")]
+    if not pins:
+        raise SystemExit(f"{repo / 'requirements.txt'} pins no iced-x86 (the build engine's CPU check needs it)")
+    print(f"installing {' '.join(pins)} for the CPU check")
+    subprocess.run([python, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                    "--root-user-action=ignore", *pins], check=True)
+
+
 def build_compiled_zip(*, out: Path | None = None, release: bool = False, target: str = "") -> Path:
     """Compiled Store zip via the Ducky build engine CLI. ``release`` bakes the Store license
     check in, so a Store upload is never unlicensed."""
@@ -148,7 +162,10 @@ def build_compiled_zip(*, out: Path | None = None, release: bool = False, target
     env["PYTHONPATH"] = str(ducky_app) + os.pathsep + env.get("PYTHONPATH", "")
     # One C compiler per core can run an agent terminal out of memory; DUCKY_NUITKA_JOBS overrides.
     env.setdefault("DUCKY_NUITKA_JOBS", "2")
-    cmd = [_ducky_python(repo, target), "-m", "backend.uefn_plugins.compile", str(ROOT), str(dest)]
+    python = _ducky_python(repo, target)
+    if target:
+        _ensure_build_deps(repo, python)
+    cmd = [python, "-m", "backend.uefn_plugins.compile", str(ROOT), str(dest)]
     if release:
         cmd.append("--release")
     print(f"compiling via {repo}")

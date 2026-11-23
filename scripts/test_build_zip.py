@@ -48,3 +48,27 @@ def test_compiled_build_is_what_the_store_release_calls(monkeypatch, tmp_path: P
     assert dest.is_file()
     assert calls and calls[0][-1] == "--release"
     assert "backend.uefn_plugins.compile" in calls[0]
+
+
+def test_a_bare_linux_image_gets_the_pinned_cpu_check_dependency(monkeypatch, tmp_path: Path) -> None:
+    """The Linux build runs in python:3.13-bookworm, which has no iced_x86 until we install it."""
+    import types
+
+    import build_zip as bz
+
+    (tmp_path / "requirements.txt").write_text("requests==2\niced-x86==1.22.0  # cpu check\n", encoding="utf-8")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(bz.subprocess, "run", fake_run)
+    bz._ensure_build_deps(tmp_path, "py")
+    assert calls[-1][:4] == ["py", "-m", "pip", "install"]
+    assert calls[-1][-1] == "iced-x86==1.22.0"
+
+    calls.clear()
+    monkeypatch.setattr(bz.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or types.SimpleNamespace(returncode=0))
+    bz._ensure_build_deps(tmp_path, "py")
+    assert len(calls) == 1  # already importable: nothing installed
