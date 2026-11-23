@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-"""Zip plugin.json + backend (+ assets) for Store upload. No secrets."""
+"""Zip plugin.json + backend (+ assets) for Store upload. No secrets.
+
+``--compiled`` builds through the UEFN Ducky build engine instead: the backend becomes an
+extension module (no Python source ships). The Store release uses it.
+``--target linux-x86_64|linux-arm64`` is the compiled build on that Linux host (Nuitka can't
+cross-compile); the zip name carries the target.
+"""
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import zipfile
 import pathlib
 from pathlib import Path
@@ -12,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "deploy"
 
 
-def _prune_superseded_zips(keep: pathlib.Path | None = None) -> None:
+def _prune_superseded_zips(keep: pathlib.Path | None = None, pattern: str = "*.ducky-plugin.zip") -> None:
     """Delete every built zip except the one just built.
 
     deploy/ is gitignored build output; superseded zips are stale files that
@@ -20,7 +29,7 @@ def _prune_superseded_zips(keep: pathlib.Path | None = None) -> None:
     script. Keeping them only invites installing an old build by mistake.
     """
     try:
-        zips = sorted(OUT_DIR.glob("*.ducky-plugin.zip"))
+        zips = sorted(OUT_DIR.glob(pattern))
     except OSError:
         return
     survivor = keep
@@ -75,5 +84,90 @@ def build_zip(*, out: Path | None = None) -> Path:
     return dest
 
 
+def _find_ducky_repo() -> Path:
+    """The UEFN-Ducky checkout holding the build engine: ``DUCKY_REPO``, else a sibling of
+    this repo's (or, from a sandbox worktree, its main checkout's) uefn-plugins/ folder."""
+    candidates: list[Path] = []
+    env = os.environ.get("DUCKY_REPO", "").strip()
+    if env:
+        candidates.append(Path(env))
+    roots = [ROOT]
+    common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            cwd=str(ROOT), capture_output=True, text=True, check=False)
+    if common.returncode == 0 and common.stdout.strip():
+        roots.append(Path(common.stdout.strip()).parent)
+    for root in roots:
+        github = root.parent.parent
+        for name in ("UEFN-Ducky-Release", "UEFN-Ducky"):
+            candidates.append(github / name)
+    for cand in candidates:
+        if (cand / "ducky_app" / "backend" / "uefn_plugins" / "compile.py").is_file():
+            return cand
+    raise SystemExit(
+        "UEFN-Ducky checkout not found — set DUCKY_REPO to it (must contain "
+        "ducky_app/backend/uefn_plugins/compile.py)."
+    )
+
+
+TARGETS = ("linux-x86_64", "linux-arm64")
+
+
+def _host_target() -> str:
+    """'linux-x86_64' / 'linux-arm64' on a Linux host, '' elsewhere (Windows builds stay untagged)."""
+    import platform
+
+    arch = platform.machine().lower()
+    arch = {"amd64": "x86_64", "aarch64": "arm64"}.get(arch, arch)
+    return f"linux-{arch}" if sys.platform.startswith("linux") else ""
+
+
+def _ducky_python(repo: Path, target: str = "") -> str:
+    venv = repo / ".venv" / "bin" / "python" if target else repo / ".venv" / "Scripts" / "python.exe"
+    return str(venv) if venv.is_file() else sys.executable
+
+
+def build_compiled_zip(*, out: Path | None = None, release: bool = False, target: str = "") -> Path:
+    """Compiled Store zip via the Ducky build engine CLI. ``release`` bakes the Store license
+    check in, so a Store upload is never unlicensed."""
+    manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
+    pid = str(manifest.get("id") or "").strip()
+    version = manifest.get("version") or 1
+    if not pid:
+        raise SystemExit("plugin.json missing id")
+    host = _host_target()
+    target = target or host
+    if target and target != host:
+        raise SystemExit(f"--target {target} builds on a {target} machine (Nuitka can't cross-compile); "
+                         f"this host is {host or sys.platform}")
+    tag = f"-{target}" if target else ""
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    dest = out or (OUT_DIR / f"{pid}-{version}{tag}-compiled.ducky-plugin.zip")
+    repo = _find_ducky_repo()
+    ducky_app = repo / "ducky_app"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ducky_app) + os.pathsep + env.get("PYTHONPATH", "")
+    # One C compiler per core can run an agent terminal out of memory; DUCKY_NUITKA_JOBS overrides.
+    env.setdefault("DUCKY_NUITKA_JOBS", "2")
+    cmd = [_ducky_python(repo, target), "-m", "backend.uefn_plugins.compile", str(ROOT), str(dest)]
+    if release:
+        cmd.append("--release")
+    print(f"compiling via {repo}")
+    subprocess.run(cmd, cwd=str(ducky_app), env=env, check=True)
+    print(f"wrote {dest} ({dest.stat().st_size} bytes)")
+    _prune_superseded_zips(dest, f"*{tag}-compiled.ducky-plugin.zip" if target else "*.ducky-plugin.zip")
+    return dest
+
+
 if __name__ == "__main__":
-    _prune_superseded_zips(build_zip())
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--compiled", action="store_true",
+                    help="compile the backend via the Ducky build engine (no Python source ships)")
+    ap.add_argument("--target", choices=TARGETS, default="",
+                    help="Linux compiled build for this host's CPU (implies --compiled)")
+    args = ap.parse_args()
+    if args.compiled or args.target:
+        build_compiled_zip(target=args.target)
+    else:
+        _prune_superseded_zips(build_zip())

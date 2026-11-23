@@ -29,3 +29,22 @@ def test_tests_are_not_shipped_to_users(tmp_path: Path) -> None:
 
     shipped_tests = [n for n in names if "test_" in n or "conftest" in n]
     assert shipped_tests == []
+
+
+def test_compiled_build_is_what_the_store_release_calls(monkeypatch, tmp_path: Path) -> None:
+    """release_platforms calls build_compiled_zip(release=True[, target=...]) on this module."""
+    import build_zip as bz
+
+    calls = []
+    monkeypatch.setattr(bz, "_find_ducky_repo", lambda: tmp_path)
+    monkeypatch.setattr(bz, "OUT_DIR", tmp_path)
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        Path(cmd[-2]).write_bytes(b"zip")
+
+    monkeypatch.setattr(bz.subprocess, "run", fake_run)
+    dest = bz.build_compiled_zip(out=tmp_path / "x-compiled.ducky-plugin.zip", release=True)
+    assert dest.is_file()
+    assert calls and calls[0][-1] == "--release"
+    assert "backend.uefn_plugins.compile" in calls[0]
