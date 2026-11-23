@@ -66,7 +66,8 @@ def resolve_bin(override: str = "") -> str:
 
 
 _signed: dict[tuple[str, int, int], bool] = {}
-_SIGNED_PS = ("$s = Get-AuthenticodeSignature -LiteralPath $env:DUCKY_AGY_PATH; "
+_SIGNED_PS = ("$ErrorActionPreference = 'Stop'; "
+              "$s = Get-AuthenticodeSignature -LiteralPath $env:DUCKY_AGY_PATH; "
               "if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -like 'CN=Google LLC,*') { 'google' }")
 
 
@@ -80,13 +81,19 @@ def google_signed(path: str, *, run: Callable[..., Any] = subprocess.run) -> boo
         return False
     key = (os.path.normcase(os.path.abspath(path)), st.st_mtime_ns, st.st_size)
     if key not in _signed:
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        powershell = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        # Use Windows PowerShell's own module search path, even when Ducky was launched from PowerShell 7.
+        env = {name: value for name, value in os.environ.items() if name.upper() != "PSMODULEPATH"}
+        env["DUCKY_AGY_PATH"] = path
         try:
-            out = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _SIGNED_PS],
-                      capture_output=True, text=True, timeout=60,
-                      env={**os.environ, "DUCKY_AGY_PATH": path}, **hidden()).stdout
+            probe = run([str(powershell), "-NoProfile", "-NonInteractive", "-Command", _SIGNED_PS],
+                        capture_output=True, text=True, timeout=60, env=env, **hidden())
         except (OSError, subprocess.SubprocessError):
             return False  # not cached: the next look tries again
-        _signed[key] = (out or "").strip() == "google"
+        if probe.returncode != 0:
+            return False
+        _signed[key] = (probe.stdout or "").strip() == "google"
     return _signed[key]
 
 
@@ -162,7 +169,7 @@ def install_in_background() -> None:
 
 def install_status() -> str:
     if _install["busy"]:
-        return "Downloading Antigravity from Google (about 240 MB)…"
+        return "Downloading the Antigravity CLI from Google (about 240 MB)…"
     return str(_install["error"] or "")
 
 
@@ -234,7 +241,7 @@ def start_login(cli_path: str = "", *, popen: Callable[..., Any] = subprocess.Po
     binary = resolve_bin(cli_path)
     if not binary:
         install_in_background()
-        return {"ok": False, "error": "Ducky is downloading Antigravity from Google (about 240 MB). "
+        return {"ok": False, "error": "Ducky is downloading the Antigravity CLI from Google (about 240 MB). "
                                       "Press Log in again when the row says Found."}
     _stop_login()
     try:

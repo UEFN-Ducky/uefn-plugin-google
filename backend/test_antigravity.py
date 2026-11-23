@@ -273,6 +273,43 @@ def test_the_real_install_is_google_signed() -> None:
     assert agy_cli.google_signed(str(agy_cli.managed_bin())) is True
 
 
+def test_google_signed_uses_system_powershell_and_retries_a_failed_probe(monkeypatch, tmp_path) -> None:
+    import pytest
+
+    if os.name != "nt":
+        pytest.skip("Authenticode is Windows only")
+
+    exe = tmp_path / "agy.exe"
+    exe.write_bytes(b"MZ")
+    system_root = tmp_path / "Windows"
+    powershell = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    powershell.parent.mkdir(parents=True)
+    powershell.touch()
+    path = r"%SystemRoot%\System32\WindowsPowerShell\v1.0"
+    module_path = str(tmp_path / "PowerShell 7" / "Modules")
+    monkeypatch.setenv("SystemRoot", str(system_root))
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.setenv("PSModulePath", module_path)
+    monkeypatch.setattr(agy_cli, "_signed", {})
+    monkeypatch.setattr(agy_cli, "hidden", lambda: {})
+
+    results = iter([(1, "", "Module loading failed"), (0, "google\n", "")])
+
+    def run(argv, **kwargs):
+        assert argv[0] == str(powershell)
+        env = kwargs["env"]
+        assert env["DUCKY_AGY_PATH"] == str(exe)
+        assert all(key.casefold() != "psmodulepath" for key in env)
+        returncode, stdout, stderr = next(results)
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    assert agy_cli.google_signed(str(exe), run=run) is False
+    assert agy_cli.google_signed(str(exe), run=run) is True
+    assert agy_cli.google_signed(str(exe), run=run) is True
+    assert os.environ["PATH"] == path
+    assert os.environ["PSModulePath"] == module_path
+
+
 def test_limit_errors() -> None:
     assert aga.is_limit_error("RESOURCE_EXHAUSTED: 429") and not aga.is_limit_error("syntax error")
 

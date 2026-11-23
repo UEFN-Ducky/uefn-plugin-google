@@ -316,7 +316,7 @@ class AntigravityAdapter:
                 logged_in, "sign-in state unknown")
         else:
             agy_cli.install_in_background()
-            status = agy_cli.install_status() or "Antigravity not found — Ducky is downloading it from Google."
+            status = agy_cli.install_status() or "Antigravity CLI not found — Ducky is downloading it from Google."
         info = CodingAgentInfo(id=self.id, label=self.label, enabled=enabled, available=bool(path) and enabled,
                                status=status, cli_path=path or override,
                                default_args=str(cfg.get("default_args") or ""), capabilities=self.capabilities,
@@ -331,7 +331,7 @@ class AntigravityAdapter:
         del image_paths  # ponytail: -p takes no pictures; add when agy grows a flag for them
         binary = agy_cli.resolve_bin(cli_path)
         if not binary:
-            push({"type": "status", "text": "Downloading Antigravity from Google…", "conv_id": conv_id, "run_id": run_id})
+            push({"type": "status", "text": "Downloading the Antigravity CLI from Google…", "conv_id": conv_id, "run_id": run_id})
             agy_cli.install()
             binary = agy_cli.resolve_bin(cli_path)
             if not binary:
