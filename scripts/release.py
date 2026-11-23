@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -84,6 +85,53 @@ def mcp_call(base_url: str, api_key: str, name: str, arguments: dict) -> dict:
                     pass
             return {"ok": True, "text": text}
     return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+def _unwrap(result: dict, key: str) -> dict:
+    """The dict holding ``key`` in a tool result (the host may nest ``payload``)."""
+    node = result
+    for _ in range(4):
+        if not isinstance(node, dict) or key in node:
+            break
+        node = node.get("payload")
+    return node if isinstance(node, dict) else {}
+
+
+def upload_with_ticket(base_url: str, api_key: str, zip_path: Path) -> str:
+    """Upload the zip straight to the Store's storage and return its uploadId.
+
+    ``uds_upload_ticket`` hands out a presigned PUT with the size signed; ``uds_release``
+    then names the upload by id (MCP bodies stop at 64 KB).
+    """
+    data = zip_path.read_bytes()
+    ticket = _unwrap(
+        mcp_call(
+            base_url,
+            api_key,
+            "uds_upload_ticket",
+            {"size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "purpose": "release"},
+        ),
+        "uploadId",
+    )
+    upload_id = str(ticket.get("uploadId") or "").strip()
+    put_url = str(ticket.get("putUrl") or "").strip()
+    if not upload_id or not put_url:
+        raise SystemExit(f"Upload ticket failed: {ticket}")
+    req = urllib.request.Request(
+        put_url,
+        data=data,
+        method="PUT",
+        headers={"Content-Length": str(len(data)), "User-Agent": "UEFN-Ducky-PluginRelease/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"Upload PUT HTTP {exc.code}: {detail}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise SystemExit(f"Upload PUT failed: {exc}") from exc
+    return upload_id
 
 
 def publish(zip_path: Path, *, category: str, changelog: str) -> None:
