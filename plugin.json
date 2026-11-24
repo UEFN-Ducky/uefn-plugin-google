@@ -1,7 +1,7 @@
 {
   "id": "google",
   "kind": "plugin",
-  "version": "1.0.69",
+  "version": "1.0.70",
   "label": "Google",
   "description": "Google Gemini for chats, pictures and video. Adds Google under Settings → LLMs → Providers & Keys, the Gemini CLI and Antigravity coding agents (Antigravity signs in with your Google account and runs on your Google AI plan), Gemini picture and Veo video tools for every ducky (they ask before spending on your key), and Google workflow nodes.",
   "min_app_version": "1.2.45",
