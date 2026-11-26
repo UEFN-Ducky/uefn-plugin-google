@@ -310,6 +310,59 @@ def test_google_signed_uses_system_powershell_and_retries_a_failed_probe(monkeyp
     assert os.environ["PSModulePath"] == module_path
 
 
+def _as_mac(monkeypatch, machine: str = "arm64") -> None:
+    """sys.platform only: patching os.name too breaks pathlib on the Windows test host."""
+    import platform
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+
+
+def test_darwin_targets_and_codesign_check(monkeypatch, tmp_path) -> None:
+    """macOS: Google's darwin build per chip, and only a binary Google's Apple team signed runs."""
+    exe = tmp_path / "agy"
+    exe.write_bytes(b"\xcf\xfa\xed\xfe")
+    monkeypatch.setattr(agy_cli, "_signed", {})
+    _as_mac(monkeypatch)
+    monkeypatch.setattr(agy_cli.os, "name", "posix")  # no Path is made until undo below
+    assert agy_cli.platform_target() == "darwin_arm64"
+    _as_mac(monkeypatch, "x86_64")
+    assert agy_cli.platform_target() == "darwin_amd64"
+    team = {"id": "EQHXZ8M8AV"}
+
+    def run(argv, **kw):
+        assert argv[0] == "/usr/bin/codesign"
+        return subprocess.CompletedProcess(argv, 0, "", f"Identifier=agy\nTeamIdentifier={team['id']}\n")
+
+    assert agy_cli.google_signed(str(exe), run=run) is True
+    agy_cli._signed.clear()
+    team["id"] = "ABCDE12345"  # someone else's signature: refused
+    assert agy_cli.google_signed(str(exe), run=run) is False
+
+
+def test_darwin_install_unpacks_the_tarball(monkeypatch, tmp_path) -> None:
+    import hashlib
+    import tarfile
+
+    _as_mac(monkeypatch)
+    monkeypatch.setattr(agy_cli.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr("backend.cli_update.install_skip_reason", lambda: "")
+    monkeypatch.setattr(agy_cli, "refresh_agents", lambda: None)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("antigravity-cli/agy")
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"MACH"))
+    blob = buf.getvalue()
+    url = agy_cli._DOWNLOAD_PREFIX + "1.0/agy-darwin-arm64.tar.gz"
+    feed = json.dumps({"version": "1.0", "url": url, "sha512": hashlib.sha512(blob).hexdigest()}).encode()
+    monkeypatch.setattr(agy_cli.urllib.request, "urlopen", lambda u, timeout=0: io.BytesIO(blob))
+    out = agy_cli.install(fetch=lambda u: feed)
+    assert out["ok"] is True, out
+    assert agy_cli.managed_bin().read_bytes() == b"MACH"  # agy on a Mac; agy.exe on this test host
+
+
 def test_limit_errors() -> None:
     assert aga.is_limit_error("RESOURCE_EXHAUSTED: 429") and not aga.is_limit_error("syntax error")
 

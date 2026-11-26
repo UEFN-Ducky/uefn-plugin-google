@@ -14,6 +14,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import tarfile
 import threading
 import time
 import urllib.request
@@ -29,6 +31,7 @@ URL_WAIT_S = 90.0  # the one-file runtime unpacks itself on its first start
 SUBMIT_WAIT_S = 60.0
 _URL_RE = re.compile(r"https://accounts\.google\.com/\S+")
 _MODEL_ID_RE = re.compile(r"^[a-z][a-z0-9.\-]*[0-9][a-z0-9.\-]*$")
+GOOGLE_APPLE_TEAM_ID = "EQHXZ8M8AV"  # Google LLC's Developer ID team (Chrome, Drive, Antigravity)
 
 _install: dict[str, Any] = {"busy": False, "error": ""}
 _install_lock = threading.Lock()
@@ -72,14 +75,25 @@ _SIGNED_PS = ("$ErrorActionPreference = 'Stop'; "
 
 
 def google_signed(path: str, *, run: Callable[..., Any] = subprocess.run) -> bool:
-    """Windows: a valid Authenticode signature from Google LLC (cached per file version)."""
-    if os.name != "nt":
-        return True  # ponytail: no signature check off Windows (Ducky only installs agy on Windows)
+    """Windows: a valid Authenticode signature from Google LLC; macOS: a valid code signature
+    from Google's Apple team (cached per file version)."""
+    if os.name != "nt" and sys.platform != "darwin":
+        return True  # ponytail: Linux has no signer to check
     try:
         st = os.stat(path)
     except OSError:
         return False
     key = (os.path.normcase(os.path.abspath(path)), st.st_mtime_ns, st.st_size)
+    if key not in _signed and sys.platform == "darwin":
+        try:
+            check = run(["/usr/bin/codesign", "--verify", "--strict", path], capture_output=True, text=True, timeout=60)
+            info = run(["/usr/bin/codesign", "-dv", path], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if info.returncode != 0:
+            return False  # not cached: the next look tries again
+        team = f"TeamIdentifier={GOOGLE_APPLE_TEAM_ID}"
+        _signed[key] = check.returncode == 0 and team in ((info.stderr or "") + (info.stdout or ""))
     if key not in _signed:
         system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
         powershell = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
@@ -102,7 +116,7 @@ def platform_target() -> str:
 
     machine = platform.machine().lower()
     arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
-    osname = {"nt": "windows"}.get(os.name) or ("darwin" if os.uname().sysname == "Darwin" else "linux")
+    osname = "windows" if os.name == "nt" else ("darwin" if sys.platform == "darwin" else "linux")
     return f"{osname}_{arch}"
 
 
@@ -124,7 +138,7 @@ def install(fetch: Callable[[str], bytes] | None = None) -> dict[str, Any]:
     skip = install_skip_reason()
     if skip:
         return {"ok": False, "error": f"this Ducky instance does not install Antigravity ({skip})"}
-    if os.name != "nt":  # ponytail: Google ships a tar.gz there; install it yourself
+    if os.name != "nt" and sys.platform != "darwin":  # ponytail: Linux builds are not signed; install it yourself
         return {"ok": False, "error": "Install the Antigravity CLI from antigravity.google/download."}
     with _install_lock:
         _install.update(busy=True, error="")
@@ -141,6 +155,7 @@ def install(fetch: Callable[[str], bytes] | None = None) -> dict[str, Any]:
             if digest.hexdigest().lower() != man["sha512"].lower():
                 part.unlink(missing_ok=True)
                 raise ValueError("Antigravity download did not match Google's checksum")
+            _unpack(part)
             os.replace(part, dest)
             refresh_agents()  # the row read "Not found" while this ran: its Log in shows now
             return {"ok": True, "cli_path": str(dest), "version": man["version"]}
@@ -149,6 +164,22 @@ def install(fetch: Callable[[str], bytes] | None = None) -> dict[str, Any]:
             return {"ok": False, "error": _install["error"]}
         finally:
             _install["busy"] = False
+
+
+def _unpack(part: Path) -> None:
+    """macOS feeds a tar.gz holding ``agy``: swap the download for that one file (made executable)."""
+    if not tarfile.is_tarfile(part):
+        if os.name != "nt":
+            os.chmod(part, 0o755)
+        return
+    with tarfile.open(part) as tar:
+        member = next((m for m in tar.getmembers() if m.isfile() and Path(m.name).name == "agy"), None)
+        src = tar.extractfile(member) if member else None
+        if src is None:
+            raise ValueError("Antigravity download has no agy program in it")
+        data = src.read()
+    part.write_bytes(data)
+    os.chmod(part, 0o755)
 
 
 def refresh_agents() -> None:
